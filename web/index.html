@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>xmoat 护城河</title>
+  <link rel="icon" href="/favicon.svg?v=__ASSET_VERSION__" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=__ASSET_VERSION__">
+  <!--
+    This page is a client of /api/v1 and nothing more. It renders the analysis
+    object the engine returns and computes no financial number itself, so a
+    phone app can replace it without the engine changing. Every string from the
+    API is inserted with textContent; nothing here builds HTML from data.
+  -->
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">xmoat</span>
+      <span class="brand-sub">护城河</span>
+    </a>
+    <form class="add-form" id="add-form" autocomplete="off">
+      <label class="visually-hidden" for="add-code">股票代码</label>
+      <input id="add-code" name="code" inputmode="numeric" maxlength="9"
+             placeholder="加入自选：600519" required>
+      <button type="submit" class="btn btn-primary">加入</button>
+    </form>
+  </header>
+
+  <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+
+  <main id="view" class="view" tabindex="-1"></main>
+
+  <footer class="footer">
+    数据来自东方财富公开接口，可能有延迟或错漏，关键数字请对照原始公告。仅供研究，不构成投资建议。
+  </footer>
+
+  <script src="/chart.js?v=__ASSET_VERSION__"></script>
+  <script src="/app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

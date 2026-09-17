@@ -1,0 +1,7 @@
+# Copy to xmoat.local.cfg (gitignored). Loaded before xmoat.cfg, so anything
+# here wins over it.
+
+# Required before LISTEN_HOST may be anything but loopback.
+# API_TOKEN=a-long-random-string
+
+# HTTP_PROXY=socks5h://127.0.0.1:1080

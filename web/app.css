@@ -1,0 +1,334 @@
+/* xmoat web client.
+ *
+ * Colors are tokens on :root, redefined for dark mode both under the OS
+ * preference and under an explicit data-theme, so a future theme toggle wins
+ * either way. The chart series color is slot 1 of the validated reference
+ * palette (blue), checked in both modes; status colors are reserved for the
+ * checklist and always ship with an icon and a label. */
+
+:root {
+  color-scheme: light;
+  --page: #f6f5f1;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #7a7873;
+  --hairline: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --accent: #1c5cab;
+  --accent-ink: #ffffff;
+  --series-1: #2a78d6;
+  --series-1-wash: rgba(42, 120, 214, 0.10);
+  --meter-track: #cde2fb;
+  --band-wash: rgba(11, 11, 11, 0.06);
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --warning: #fab219;
+  --warning-ink: #8a5a00;
+  --critical: #d03b3b;
+  --na: #898781;
+  --focus: #2a78d6;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #9a988f;
+    --hairline: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --accent: #3987e5;
+    --accent-ink: #0b0b0b;
+    --series-1: #3987e5;
+    --series-1-wash: rgba(57, 135, 229, 0.12);
+    --meter-track: #184f95;
+    --band-wash: rgba(255, 255, 255, 0.07);
+    --good-ink: #0ca30c;
+    --warning-ink: #fab219;
+    --critical: #e66767;
+    --focus: #6da7ec;
+    --shadow: none;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #9a988f;
+  --hairline: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --accent: #3987e5;
+  --accent-ink: #0b0b0b;
+  --series-1: #3987e5;
+  --series-1-wash: rgba(57, 135, 229, 0.12);
+  --meter-track: #184f95;
+  --band-wash: rgba(255, 255, 255, 0.07);
+  --good-ink: #0ca30c;
+  --warning-ink: #fab219;
+  --critical: #e66767;
+  --focus: #6da7ec;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* ── top bar ─────────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px max(16px, calc((100% - 1120px) / 2));
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.brand { display: flex; align-items: baseline; gap: 8px; color: var(--ink); }
+.brand:hover { text-decoration: none; }
+.brand-mark {
+  align-self: center; width: 22px; height: 22px; border-radius: 6px;
+  background: url("/favicon.svg") center / cover;
+}
+.brand-name { font-weight: 650; font-size: 17px; letter-spacing: 0.2px; }
+.brand-sub { color: var(--muted); font-size: 13px; }
+
+.add-form { display: flex; gap: 8px; margin-left: auto; }
+.add-form input { width: 180px; }
+
+input, select {
+  font: inherit; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; min-height: 34px;
+}
+input:focus-visible, select:focus-visible { outline-offset: 0; }
+
+.btn {
+  font: inherit; cursor: pointer; white-space: nowrap;
+  min-height: 34px; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+}
+.btn:hover { background: var(--surface-2); }
+.btn:disabled { opacity: 0.55; cursor: progress; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover { background: var(--accent); filter: brightness(1.08); }
+.btn-quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn-small { min-height: 28px; padding: 2px 8px; font-size: 13px; }
+
+/* ── layout ──────────────────────────────────────────────────────────────── */
+
+.view { max-width: 1120px; margin: 0 auto; padding: 20px 16px 40px; outline: none; }
+
+.status {
+  max-width: 1120px; margin: 12px auto 0; padding: 8px 12px;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink-2);
+}
+.status.is-error { border-color: var(--critical); color: var(--ink); }
+.status.is-error::before { content: "⚠ "; color: var(--critical); }
+
+.footer {
+  max-width: 1120px; margin: 0 auto; padding: 16px 16px 32px;
+  color: var(--muted); font-size: 12px;
+}
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 16px; margin-bottom: 16px;
+}
+.card > h2 { margin: 0 0 12px; font-size: 15px; font-weight: 650; }
+.card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.card-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.card-head .spacer { flex: 1; }
+
+.muted { color: var(--muted); }
+.mt { margin-top: 12px; }
+.mt-s { margin-top: 8px; }
+.mb { margin-bottom: 12px; }
+.small { font-size: 12px; }
+.num { font-variant-numeric: tabular-nums; }
+.note {
+  margin: 0 0 16px; padding: 10px 12px; border-radius: 8px;
+  background: var(--surface-2); color: var(--ink-2);
+}
+
+.page-head { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.page-head h1 { margin: 0; font-size: 22px; font-weight: 650; }
+.page-head .meta { color: var(--muted); }
+.page-head .spacer { flex: 1; }
+
+.empty { text-align: center; padding: 48px 16px; color: var(--ink-2); }
+.empty p { margin: 6px 0; }
+
+/* ── tables ──────────────────────────────────────────────────────────────── */
+
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
+th { font-weight: 500; color: var(--muted); font-size: 12px; white-space: nowrap; }
+td.r, th.r { text-align: right; }
+tbody tr:last-child td { border-bottom: none; }
+td .sub { display: block; color: var(--muted); font-size: 12px; }
+
+.watch-table tbody tr { cursor: pointer; }
+.watch-table tbody tr:hover td { background: var(--surface-2); }
+.watch-table .code { color: var(--muted); font-variant-numeric: tabular-nums; }
+.watch-table .name { font-weight: 600; }
+
+.quality-table td:first-child, .quality-table th:first-child {
+  position: sticky; left: 0; background: var(--surface); white-space: nowrap;
+}
+
+/* ── percentile meter ────────────────────────────────────────────────────── */
+
+.pct { display: inline-flex; align-items: center; gap: 6px; }
+.meter {
+  position: relative; width: 56px; height: 6px; border-radius: 3px;
+  background: var(--meter-track); overflow: hidden;
+}
+.meter > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--series-1); border-radius: 3px; }
+
+/* ── metrics ─────────────────────────────────────────────────────────────── */
+
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.metric {
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 12px;
+}
+.metric .label { color: var(--ink-2); font-size: 13px; }
+.metric .value { font-size: 24px; font-weight: 600; margin: 2px 0 8px; }
+.metric .rows { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 13px; }
+.metric .rows dt { color: var(--muted); }
+.metric .rows dd { margin: 0; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.tile { border: 1px solid var(--hairline); border-radius: 8px; padding: 12px; }
+.tile .label { color: var(--ink-2); font-size: 13px; }
+.tile .value { font-size: 20px; font-weight: 600; margin-top: 2px; }
+.tile .foot { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+.pos-below { color: var(--good-ink); }
+.pos-above { color: var(--critical); }
+
+/* ── band editor ─────────────────────────────────────────────────────────── */
+
+.band-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.band-form input { width: 90px; }
+
+/* ── checklist ───────────────────────────────────────────────────────────── */
+
+.checks { list-style: none; margin: 0; padding: 0; }
+.checks li { display: grid; grid-template-columns: 22px 1fr; gap: 2px 8px; padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+.checks li:last-child { border-bottom: none; }
+.checks .icon {
+  grid-row: span 2; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff;
+}
+.checks .pass .icon { background: var(--good); }
+.checks .warn .icon { background: var(--warning); color: #0b0b0b; }
+.checks .na .icon { background: var(--na); }
+.checks .title { font-weight: 600; }
+.checks .tag { font-size: 12px; font-weight: 500; margin-left: 6px; }
+.checks .pass .tag { color: var(--good-ink); }
+.checks .warn .tag { color: var(--warning-ink); }
+.checks .na .tag { color: var(--muted); }
+.checks .detail { color: var(--ink-2); font-size: 13px; }
+
+.badge {
+  display: inline-block; min-width: 20px; padding: 0 6px; border-radius: 10px;
+  font-size: 12px; text-align: center; background: var(--surface-2); color: var(--ink-2);
+}
+.badge.is-warn { background: var(--warning); color: #0b0b0b; }
+
+/* ── chart ───────────────────────────────────────────────────────────────── */
+
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 13px; border: 0; background: var(--surface); color: var(--ink-2);
+  padding: 4px 10px; min-height: 30px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 600; }
+
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.chart .grid line { stroke: var(--hairline); stroke-width: 1; }
+.chart .axis text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .baseline { stroke: var(--axis); stroke-width: 1; }
+.chart .line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .area { fill: var(--series-1-wash); stroke: none; }
+.chart .band { fill: var(--band-wash); }
+.chart .ref { stroke: var(--ink-2); stroke-width: 1; opacity: 0.6; }
+.chart .ref-label, .chart .end-label {
+  /* A halo in the surface color keeps a label legible where it crosses the line. */
+  paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round;
+}
+.chart .ref-label { fill: var(--ink-2); font-size: 11px; }
+.chart .end-dot { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+.chart .end-label { fill: var(--ink); font-size: 12px; font-weight: 600; }
+.chart .cross { stroke: var(--axis); stroke-width: 1; }
+.chart .hit { fill: transparent; cursor: crosshair; }
+.chart .hover-dot { fill: var(--series-1); stroke: var(--surface); stroke-width: 2; }
+
+.tooltip {
+  position: absolute; pointer-events: none; z-index: 5;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 6px 10px; font-size: 12px; white-space: nowrap;
+}
+.tooltip .v { font-size: 14px; font-weight: 650; color: var(--ink); display: flex; align-items: center; gap: 6px; }
+.tooltip .v::before { content: ""; width: 12px; height: 2px; background: var(--series-1); border-radius: 1px; }
+.tooltip .d { color: var(--muted); }
+
+/* ── small screens: the watchlist becomes cards ──────────────────────────── */
+
+@media (max-width: 720px) {
+  .topbar { gap: 10px; }
+  .add-form { margin-left: 0; width: 100%; }
+  .add-form input { flex: 1; width: auto; }
+
+  .watch-table thead { display: none; }
+  .watch-table, .watch-table tbody, .watch-table tr, .watch-table td { display: block; width: 100%; }
+  .watch-table tr {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--hairline);
+  }
+  .watch-table td { border: 0; padding: 2px 0; text-align: left !important; }
+  .watch-table td[data-label]::before {
+    content: attr(data-label); display: block; color: var(--muted); font-size: 11px;
+  }
+  .watch-table td.col-name, .watch-table td.col-actions { grid-column: 1 / -1; }
+  .page-head h1 { font-size: 19px; }
+}

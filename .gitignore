@@ -4,9 +4,13 @@ tmp/
 logs/
 *.log
 
-# Local overrides: Tushare token, LLM keys, webhook URLs, DB password.
-# Loaded before xmoat.cfg and therefore wins over it.
+# Local overrides: API_TOKEN, proxy credentials. Loaded before xmoat.cfg and
+# therefore wins over it.
 xmoat.local.cfg
 
 # The runtime is not tracked; copy bin/xnet or bin/xnet.exe from xnet2lua.
 bin/
+
+# Editor and assistant local state.
+.claude/
+.vscode/
