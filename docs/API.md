@@ -59,6 +59,15 @@
 | `stock.refresh` | `POST /api/v1/stocks/:code/refresh` | — | `Analysis`（先抓取再分析） |
 | `stock.valuation` | `GET /api/v1/stocks/:code/valuation` | `metric?`，`years?`，`max_points?` | `ValuationSeries` |
 | `stock.reports` | `GET /api/v1/stocks/:code/reports` | `period_type?`，`limit?` | 定期报告主要指标（原始口径） |
+| `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
+| `alerts.run` | `POST /api/v1/alerts/run` | — | `RunResult`：刷新全部自选、记录变化并推送，和定时检查相同 |
+| `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
+| `notify.test` | `POST /api/v1/notify/test` | — | `PushResult[]`；没有配置渠道时为 `bad_request` |
+| `schedule.status` | `GET /api/v1/schedule` | — | `ScheduleStatus` |
+
+**提醒是怎么产生的。** 每次刷新一只自选股（手动、`watchlist.refresh`、`alerts.run` 或定时检查），
+引擎都会比较刷新前后的数据并记录变化；`stock.refresh` 和 `watchlist.refresh` 在返回后于后台推送，
+`alerts.run` 等推送完成再返回。轮询新提醒的客户端可以记住最大的 `seq`，下次带 `after_seq` 调用 `alerts.list`。
 
 `code` 接受 `600519`、`SH600519`、`600519.SH`，只支持 A 股个股。
 
@@ -177,6 +186,42 @@ type Check = {
   value?: number, values?: object, threshold?: number, period?: string,
 }
 ```
+
+### Alert、RunResult、ScheduleStatus
+
+```ts
+type Alert = {
+  id: string,                               // 由股票和变化内容决定，同一变化只记一次
+  seq: number,                              // 单调递增，用于 after_seq 轮询
+  code: string, name: string,
+  kind: 'report' | 'dividend' | 'band' | 'percentile' | 'check',
+  title: string, detail: string,
+  status?: 'pass' | 'warn',                 // 仅 check：变成了什么
+  period?: string, date?: string,           // 报告期；公告日或估值日期
+  created_at: string,
+  pushed: true | false | 'skipped' | 'failed',   // skipped = 当时没有配置渠道
+  pushed_at?: string, push_attempts?: number,
+}
+
+type PushResult = { kind: string, name: string, ok: boolean, error?: string }
+
+type RunResult = {
+  refreshed: { code: string, ok: boolean, error?: { code: string, message: string } }[],
+  new_events: number,
+  push: { sent: number, skipped?: boolean, busy?: boolean, channels: PushResult[] },
+}
+
+type ScheduleStatus = {
+  enabled: boolean,                         // 只有 HTTP 宿主会启动定时检查
+  running: boolean, last_started?: string,
+  times?: string[], weekdays?: string, utc_offset?: number,
+  now?: string, next_run?: string,          // 均为 utc_offset 时区的 'YYYY-MM-DD HH:MM'
+  last_runs?: { [time: string]: string },
+  error?: string,                           // 配置有误时
+}
+```
+
+推送给 Webhook 渠道的请求体是 `{ source: 'xmoat', title, text, markdown, events: Alert[] }`。
 
 ### ValuationSeries
 

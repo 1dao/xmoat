@@ -436,13 +436,233 @@ local function test_http()
     end
 end
 
+-- ── Phase 2: events, alerts, push channels, schedule ─────────────────────────
+
+-- Two refreshes of one company. Between them: an interim report lands, a
+-- dividend plan is proposed, PE falls from mid-history to below every past day
+-- (out of the 15-30 band and into the low zone), and the debt ratio crosses 70%.
+local function event_pair()
+    local function reports(with_h1)
+        local list = {}
+        if with_h1 then
+            list[#list + 1] = R('2025-06-30', { np_parent = 50, np_parent_yoy = 25, revenue = 500,
+                                               revenue_yoy = 11.1, roe = 6.2, debt_ratio = 80,
+                                               report_name = '2025中报', notice_date = '2025-08-20' })
+        end
+        list[#list + 1] = R('2024-12-31', { np_parent = 100, np_deducted = 95, revenue = 1000, revenue_yoy = 10,
+                                            gross_margin = 30, ocf_to_np = 1.1, roe = 12, eps = 1, debt_ratio = 50 })
+        list[#list + 1] = R('2024-06-30', { np_parent = 40, revenue = 450 })
+        list[#list + 1] = R('2023-12-31', { np_parent = 90, np_deducted = 85, revenue = 909, revenue_yoy = 5,
+                                            gross_margin = 31, ocf_to_np = 1.0, roe = 11, eps = 0.9 })
+        return list
+    end
+    local function rows(last_pe)
+        local out, d = {}, '2020-01-01'
+        for i = 1, 300 do
+            out[i] = { date = d, close = 10, pe_ttm = i < 300 and (10 + i / 10) or last_pe, market_cap = 1000 }
+            d = util_date_add_days(d, 1)
+        end
+        return out
+    end
+    local base = { code = '600000', market = 'SH', name = '测试银行股份', org_type = 'general',
+                   balance = {}, sources = {} }
+    local old, new = util_copy(base), util_copy(base)
+    old.reports, old.valuation, old.dividends = reports(false), rows(25), {}
+    new.reports, new.valuation = reports(true), rows(10.05)
+    new.dividends = { { period = '2024-12-31', progress = '董事会预案', plan = '10派5元(含税)', dps = 0.5 } }
+    local watch = { code = '600000', band = { metric = 'pe_ttm', low = 15, high = 30 } }
+    return old, new, watch
+end
+
+local function kinds_of(events)
+    local m = {}
+    for _, e in ipairs(events) do m[e.kind] = e end
+    return m
+end
+
+local function test_events()
+    section('events')
+    local old, new, watch = event_pair()
+    local opts = { dcf = { discount_rate = 10, terminal_growth = 3, years = 10 },
+                   percentile_low = 10, percentile_high = 90 }
+    local evs = events_diff(old, new, watch, opts)
+    local k = kinds_of(evs)
+    eq('a new interim report is an event', k.report and k.report.period, '2025-06-30')
+    eq('the report title names it', k.report and k.report.title, '发布2025中报')
+    check('the report detail says interim figures are cumulative',
+        k.report and k.report.detail:find('累计营收', 1, true), k.report and k.report.detail)
+    eq('a proposed dividend is an event', k.dividend and k.dividend.title, '2024年报分红：董事会预案')
+    eq('leaving the band downwards is an event', k.band and k.band.title, 'PE（TTM） 低于你的区间')
+    check('entering the low zone is an event', k.percentile and k.percentile.title:find('历史低位', 1, true),
+        k.percentile and k.percentile.title)
+    eq('a check turning to warn is an event', k.check and k.check.title, '新提示：资产负债率不高')
+    eq('five kinds, one each', #evs, 5)
+
+    local again = events_diff(old, new, watch, opts)
+    eq('ids are stable across runs', again[1].id, evs[1].id)
+    eq('a first fetch has nothing to compare', #events_diff(nil, new, watch, opts), 0)
+    eq('an unchanged record has no events', #events_diff(new, new, watch, opts), 0)
+    local moved = { code = '600000', band = { metric = 'pe_ttm', low = 5, high = 8 } }
+    eq('editing the band between refreshes is not a crossing', #events_diff(new, new, moved, opts), 0)
+    local staying_low = events_diff(new, new, watch, { percentile_low = 50 })
+    eq('sitting inside the low zone does not repeat', #staying_low, 0)
+    return evs
+end
+
+local function test_notify()
+    section('push channels')
+    local long = string.rep('护城河', 60)                       -- 540 bytes
+    local cut = notify_truncate(long, 100)
+    check('truncation respects the byte limit', #cut <= 100, #cut)
+    check('truncation leaves valid UTF-8', utf8.len(cut) ~= nil, cut)
+    eq('a short string is untouched', notify_truncate('abc', 100), 'abc')
+    eq('URL encoding of base64', notify_urlencode('a+b/c='), 'a%2Bb%2Fc%3D')
+
+    local msg = { title = 't', markdown = 'md', text = 'tx', events = {} }
+    local ding = notify_build('dingtalk', { url = 'https://oapi.dingtalk.com/robot/send?access_token=x',
+                                            secret = 'SECtest123' }, msg, 1700000000)
+    eq('DingTalk signs with its reference vector', ding.url,
+        'https://oapi.dingtalk.com/robot/send?access_token=x&timestamp=1700000000000' ..
+        '&sign=w3RMHXzixTMdzr8OHJUmVLS4IoPJVdu%2BUt1LE48MePE%3D')
+    eq('DingTalk sends Markdown', ding.body.msgtype, 'markdown')
+    local feishu = notify_build('feishu', { url = 'https://open.feishu.cn/x', secret = 'SECtest123' }, msg, 1700000000)
+    eq('Feishu signs with its reference vector', feishu.body.sign, 'eHRRCyLH7Z4IJQSJlfwertHZThRUYVu2hTUH02xPXYU=')
+    eq('Feishu timestamp is in seconds', feishu.body.timestamp, '1700000000')
+    eq('Feishu without a secret is unsigned', notify_build('feishu', { url = 'u' }, msg, 1).body.sign, nil)
+    local tg = notify_build('telegram', { api = 'https://api.telegram.org', token = '12:AB', chat_id = '7' }, msg, 1)
+    eq('Telegram URL carries the token', tg.url, 'https://api.telegram.org/bot12:AB/sendMessage')
+    eq('Telegram sends plain text', tg.body.parse_mode, nil)
+    eq('WeCom sends Markdown', notify_build('wecom', { url = 'u' }, msg, 1).body.markdown.content, 'md')
+    eq('the webhook carries a bearer', notify_build('webhook', { url = 'u', bearer = 'k' }, msg, 1).headers.Authorization,
+        'Bearer k')
+
+    eq('WeCom errcode 0 is delivered', (notify_judge('wecom', { status = 200 }, { errcode = 0 })), true)
+    eq('WeCom errcode with HTTP 200 is refused', (notify_judge('wecom', { status = 200 }, { errcode = 93000, errmsg = 'x' })), false)
+    eq('Feishu code 0 is delivered', (notify_judge('feishu', { status = 200 }, { code = 0 })), true)
+    local okt, why = notify_judge('telegram', { status = 400 }, { ok = false, description = 'chat not found' })
+    check('Telegram gives its own reason', okt == false and why == 'chat not found', why)
+    eq('a webhook 204 is delivered', (notify_judge('webhook', { status = 204 }, nil)), true)
+end
+
+local function test_alerts(evs)
+    section('alert log and flush')
+    for _, e in ipairs(evs) do e.pushed, e.seq, e.created_at = nil, nil, nil end
+    eq('record adds new events', alerts_record(evs), 5)
+    eq('recording the same events again adds nothing', alerts_record(evs), 0)
+    local listed = alerts_list({ code = '600000' })
+    eq('list filters by stock', #listed, 5)
+    check('newest first', listed[1].seq > listed[#listed].seq)
+    eq('after_seq returns only newer', #alerts_list({ after_seq = listed[2].seq }), 1)
+
+    __notify_set_channels({})
+    local r = alerts_flush()
+    eq('no channel: pending events are skipped, not kept', r.skipped, true)
+    eq('nothing left pending', #alerts_pending(), 0)
+
+    local sent = {}
+    __net_set_transport(function(url, opts)
+        sent[#sent + 1] = { url = url, body = util_json_decode(opts.body) }
+        if url:find('wecom', 1, true) then
+            return { status = 200, body = '{"errcode":0,"errmsg":"ok"}' }
+        end
+        return { status = 400, body = '{"ok":false,"description":"chat not found"}' }
+    end)
+    __notify_set_channels({
+        { kind = 'wecom', name = '企业微信', conf = { url = 'https://wecom.test/send?key=k' } },
+        { kind = 'telegram', name = 'Telegram', conf = { api = 'https://tg.test', token = 't', chat_id = 'c' } },
+    })
+    alerts_record({ { id = 'unit-a', code = '600000', name = '测试银行股份', kind = 'report',
+                      title = '发布2025三季报', detail = '累计营收 1 亿' } })
+    r = alerts_flush()
+    eq('one delivered channel is enough', r.sent, 1)
+    eq('both channels were tried', #sent, 2)
+    check('the digest names the stock', sent[1].body.markdown.content:find('测试银行股份', 1, true),
+        sent[1].body.markdown.content)
+    eq('each channel reports its own result', r.channels[2].error, 'chat not found')
+    eq('a delivered event is marked', alerts_list({ limit = 1 })[1].pushed, true)
+
+    __net_set_transport(function() return { status = 200, body = '{"errcode":45009,"errmsg":"limit"}' } end)
+    __notify_set_channels({ { kind = 'wecom', name = '企业微信', conf = { url = 'u' } } })
+    alerts_record({ { id = 'unit-b', code = '600000', name = '测试银行股份', kind = 'check',
+                      status = 'warn', title = '新提示', detail = '' } })
+    alerts_flush()
+    eq('a refused push stays pending', alerts_list({ limit = 1 })[1].pushed, false)
+    alerts_flush(); alerts_flush()
+    eq('three refusals give up', alerts_list({ limit = 1 })[1].pushed, 'failed')
+    __net_set_transport(nil)
+    __notify_set_channels(nil)
+end
+
+local function test_schedule()
+    section('schedule')
+    local times = schedule_parse_times('17:30, 8:05')
+    eq('times are normalised and sorted', times and table.concat(times, ','), '08:05,17:30')
+    eq('an impossible time is refused', (schedule_parse_times('25:00')), nil)
+    local wd = schedule_parse_weekdays('1-5')
+    check('1-5 is Monday to Friday', wd[1] and wd[5] and not wd[6] and not wd[7])
+    eq('weekday 0 is refused', (schedule_parse_weekdays('0')), nil)
+
+    -- 1700000000 is 2023-11-14 22:13:20 UTC: Wednesday 06:13 in Beijing.
+    local c = schedule_clock(8, 1700000000)
+    eq('the clock is in the schedule timezone', c.date .. ' ' .. c.hm, '2023-11-15 06:13')
+    eq('Wednesday is 3', c.iso_wday, 3)
+
+    local t = { '17:30' }
+    local function clock(date, hm, wday) return { date = date, hm = hm, iso_wday = wday } end
+    eq('not due before the time', #schedule_due(clock('2023-11-15', '17:29', 3), t, wd, {}), 0)
+    eq('due at the time', #schedule_due(clock('2023-11-15', '17:30', 3), t, wd, {}), 1)
+    eq('not due twice in a day', #schedule_due(clock('2023-11-15', '20:00', 3), t, wd,
+        { ['17:30'] = '2023-11-15' }), 0)
+    eq('not due on Saturday', #schedule_due(clock('2023-11-18', '18:00', 6), t, wd, {}), 0)
+
+    eq('next: later today', schedule_next(clock('2023-11-15', '06:13', 3), t, wd, {}), '2023-11-15 17:30')
+    eq('next: a missed slot runs now', schedule_next(clock('2023-11-15', '18:00', 3), t, wd, {}),
+        '2023-11-15 18:00')
+    eq('next: after today\'s run, tomorrow', schedule_next(clock('2023-11-15', '18:00', 3), t, wd,
+        { ['17:30'] = '2023-11-15' }), '2023-11-16 17:30')
+    eq('next: Friday evening skips the weekend', schedule_next(clock('2023-11-17', '18:00', 5), t, wd,
+        { ['17:30'] = '2023-11-17' }), '2023-11-20 17:30')
+end
+
+-- A refresh through the command path records what changed.
+local function test_refresh_events()
+    section('refresh records events')
+    __notify_set_channels({})
+    eq('watch the stock', api_call('watchlist.add', { code = '600519' }).ok, true)
+    __net_set_transport(fixture_transport)
+    eq('first refresh', api_call('stock.refresh', { code = '600519' }).ok, true)
+    eq('a first fetch records no event', #alerts_list({ code = '600519' }), 0)
+
+    -- The same responses, plus a third-quarter report nobody has seen.
+    local doc = fixture('em_reports_600519.json')
+    local q3 = util_copy(doc.result.data[1])
+    q3.REPORT_DATE, q3.REPORT_DATE_NAME, q3.NOTICE_DATE = '2026-09-30 00:00:00', '2026三季报', '2026-10-28 00:00:00'
+    table.insert(doc.result.data, 1, q3)
+    local body = util_json_encode(doc)
+    __net_set_transport(function(url, opts)
+        if url:find('RPT_F10_FINANCE_MAINFINADATA', 1, true) then return { status = 200, body = body } end
+        return fixture_transport(url, opts)
+    end)
+    eq('second refresh', api_call('stock.refresh', { code = '600519' }).ok, true)
+    local got = alerts_list({ code = '600519' })
+    eq('the new report was recorded', got[1] and got[1].title, '发布2026三季报')
+    local listed = api_call('alerts.list', { code = '600519', limit = '5' })
+    eq('alerts.list returns it', listed.ok and listed.data[1].kind, 'report')
+    eq('alerts.list refuses a silly limit', api_call('alerts.list', { limit = 0 }).error.code, 'bad_request')
+    eq('notify.test without channels says how to add one', api_call('notify.test').error.code, 'bad_request')
+    eq('schedule.status works without a running schedule', api_call('schedule.status').data.enabled, false)
+    __net_set_transport(nil)
+    __notify_set_channels(nil)
+    api_call('watchlist.remove', { code = '600519' })
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local DATA = 'tmp/unit-data'
 
 local function clean()
-    for _, f in ipairs({ 'watchlist.json', 'stocks/600519.json', 'stocks/000001.json',
-                         'stocks/609999.json' }) do
+    for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
+                         'stocks/000001.json', 'stocks/609999.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -460,6 +680,11 @@ local function run_all()
     test_analysis()
     test_commands()
     test_http()
+    local evs = test_events()
+    test_notify()
+    test_alerts(evs)
+    test_schedule()
+    test_refresh_events()
 end
 
 return {

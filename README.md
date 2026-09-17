@@ -10,8 +10,8 @@
 
 </div>
 
-> **状态：Phase 1（A 股核心）可用。** 自选股、财报与估值抓取、质量指标、估值分位、反向 DCF、分红、检查清单、
-> JSON API、Web 界面和命令行都已实现，有 156 项离线测试。定时提醒、推送和大模型归纳还没有，见 [路线图](#路线图)。
+> **状态：Phase 2（提醒与推送）可用。** A 股的财报与估值分析、检查清单、定时检查、变化提醒和五种推送渠道都已实现，
+> 有 224 项离线测试。大模型归纳、港股美股和手机客户端还没有，见 [路线图](#路线图)。
 
 ## 定位
 
@@ -46,6 +46,12 @@
 - 经营现金流与净利润背离、利润靠非经常性损益
 - 商誉占净资产比例过高、现金覆盖不了短期借款
 - *计划中*：大股东质押、非标审计意见
+
+**什么变了？**
+- 新财报发布、新分红方案（预案、通过、实施）
+- 估值穿过你自己设定的区间，或进入历史低位 / 高位
+- 检查清单出现新的提示，或提示解除
+- 工作日收盘后自动检查，推送到企业微信、飞书、钉钉、Telegram 或任意 Webhook
 
 **护城河在哪里？**（*计划中*，需要配置大模型）
 - 从年报「管理层讨论与分析」中归纳竞争优势及其变化
@@ -102,6 +108,24 @@ bin/xnet.exe test/unit.lua
 配置项都在 [xmoat.cfg](xmoat.cfg) 里，旁边写着理由。命令行 `KEY=VAL` 优先于 `xmoat.local.cfg`，后者优先于 `xmoat.cfg`。
 默认只监听 `127.0.0.1`；要监听其他地址，必须先设置 `API_TOKEN`。
 
+**提醒与推送**
+
+1. 把 [xmoat.local.cfg.example](xmoat.local.cfg.example) 复制成 `xmoat.local.cfg`，填上要用的渠道：
+   企业微信、飞书（可加签）、钉钉（可加签）、Telegram（可单独走代理）或通用 Webhook。
+2. 在 Web 界面的「提醒」页点「发送测试消息」，或者：
+
+```bash
+bin/xnet.exe cli.lua notify-test
+```
+
+3. `start.bat` 运行期间，每个工作日北京时间 17:30 自动检查一次（`SCHEDULE_TIMES` 可改）。随时手动检查：
+
+```bash
+bin/xnet.exe cli.lua check
+```
+
+推送的内容和格式见 [docs/METRICS.md](docs/METRICS.md#提醒规则)。
+
 ## 报告长什么样
 
 命令行输出的一部分（公司名和数字为虚构，格式与真实输出一致）：
@@ -142,6 +166,8 @@ bin/xnet.exe test/unit.lua
             ┌───────────────┴──────────────────────────────────┐
   engine/   │  commands → stock / watch → analysis              │
             │    ├ fin · valuation · dividend · quality · checks │  纯函数
+            │    ├ events（刷新前后对比）→ alerts → notify        │
+            │    ├ schedule（定时检查，由宿主决定是否启动）       │
             │    ├ source_em（东方财富适配） → net → xhttp_client │
             │    └ store（DATA_DIR 下的 JSON 文件）              │
             └──────────────────────────────────────────────────┘
@@ -153,7 +179,8 @@ bin/xnet.exe test/unit.lua
 - **web/** 是 `/api/v1` 的纯客户端，所有来自接口的字符串都用 `textContent` 插入，页面受严格 CSP 保护。
 
 手机客户端有两种接法，引擎都不用改：在本机 `127.0.0.1` 上跑 `main.lua` 并用 WebView 加载 `web/`；
-或者通过原生桥接直接调用 `api_call`，完全不开端口。
+或者通过原生桥接直接调用 `api_call`，完全不开端口。手机系统会杀掉后台定时器，所以定时检查由宿主决定是否启动：
+服务器上由 `main.lua` 启动，手机上应由系统的后台任务唤醒后调用 `alerts.run`。
 
 工程约定沿用 [gitloom](https://github.com/1dao/gitloom)：
 - 每个模块在独立环境中加载，只通过 `g_exports` 导出，导出名必须带模块前缀
@@ -181,7 +208,11 @@ xmoat/
     checks.lua           检查清单与阈值
     analysis.lua         分析对象：所有客户端展示的那一个结构
     store.lua  watch.lua  stock.lua   存储、自选、抓取与增量合并
-    report.lua           分析对象 → Markdown
+    report.lua           分析对象 → Markdown；提醒 → 推送消息
+    events.lua           刷新前后对比：财报、分红、区间、估值分位、检查清单
+    alerts.lua           提醒记录、推送、立即检查
+    notify.lua           推送渠道：企业微信、飞书、钉钉、Telegram、Webhook
+    schedule.lua         定时检查
     api.lua  commands.lua  engine.lua 命令注册表、全部命令、启动与停止
   host/
     http.lua  web.lua    HTTP 服务与路由；静态文件
@@ -208,7 +239,7 @@ xmoat/
 
 - [x] **Phase 0 · 设计**：指标口径文档、数据字段映射、项目骨架
 - [x] **Phase 1 · A 股核心**：自选股、财报与估值抓取（增量）、质量与估值指标、分红、检查清单、银行模板、JSON 存储、命令行 Markdown 报告
-- [ ] **Phase 2 · 提醒**：财报与分红公告检测、估值区间提醒、Webhook 推送（企业微信、飞书、钉钉、Telegram）、定时运行
+- [x] **Phase 2 · 提醒**：财报与分红检测、估值区间与历史高低位提醒、检查清单变化、推送（企业微信、飞书、钉钉、Telegram、Webhook）、定时检查
 - [x] **Phase 3 · Web 界面**（提前完成基础部分）：自选管理、个股基本面页、估值走势图、合理区间设置
 - [ ] **Phase 4 · 大模型**：年报管理层讨论归纳、护城河变化对比、基于财报的问答
 - [ ] **Phase 5 · 扩展**：保险与券商模板、港股与美股、全市场条件筛选、手机客户端

@@ -1,6 +1,7 @@
 -- engine/report.lua — the analysis object as Markdown text.
 --
--- Exports: report_markdown, report_money, report_pct
+-- Exports: report_markdown, report_money, report_pct,
+--          report_events_markdown, report_events_text
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -39,6 +40,7 @@ local function fmt_unit(v, unit, digits)
 end
 
 local STATUS = { pass = '✅', warn = '⚠️', na = '➖' }
+local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉', check = '🔎' }
 local POSITION = { below = '低于', inside = '位于', above = '高于' }
 local METRIC_LABEL = { pe_ttm = 'PE(TTM)', pb = 'PB', ps_ttm = 'PS(TTM)', pcf_ttm = 'PCF(TTM)' }
 
@@ -140,5 +142,79 @@ function g_exports.report_markdown(a)
     for _, s in ipairs(a.sources or {}) do src[#src + 1] = s.item end
     if #src > 0 then f('数据来源：东方财富（%s），获取于 %s', table.concat(src, '、'), a.fetched_at or '—') end
     line('仅供研究，不构成投资建议。')
+    return table.concat(L, '\n')
+end
+
+-- ---------------------------------------------------------------------------
+-- Alert digests, for push channels
+--
+-- One message per push, events grouped by stock in the order they arrived.
+-- Two renderings of the same content: Markdown for WeCom and DingTalk, plain
+-- text for Feishu and Telegram, whose Markdown dialects reject characters that
+-- company names and dividend plans routinely contain.
+-- ---------------------------------------------------------------------------
+
+local function group_events(events, max)
+    local groups, by_code, shown = {}, {}, 0
+    for _, e in ipairs(events) do
+        if shown >= max then break end
+        local g = by_code[e.code]
+        if not g then
+            g = { code = e.code, name = e.name, items = {} }
+            by_code[e.code] = g
+            groups[#groups + 1] = g
+        end
+        g.items[#g.items + 1] = e
+        shown = shown + 1
+    end
+    return groups, #events - shown
+end
+
+local function event_icon(e)
+    if e.kind == 'check' then return e.status == 'warn' and '⚠️' or '✅' end
+    if e.kind == 'percentile' then return e.title:find('高位', 1, true) and '📈' or '📉' end
+    return KIND_ICON[e.kind] or '•'
+end
+
+-- opts: { max = 20, title = 'xmoat 提醒' }
+function g_exports.report_events_markdown(events, opts)
+    opts = opts or {}
+    local groups, rest = group_events(events, opts.max or 20)
+    local L = { string.format('### %s（%d 条）', opts.title or 'xmoat 提醒', #events) }
+    for _, g in ipairs(groups) do
+        L[#L + 1] = ''
+        L[#L + 1] = string.format('**%s**（%s）', g.name or g.code, g.code)
+        for _, e in ipairs(g.items) do
+            L[#L + 1] = string.format('- %s %s', event_icon(e), e.title)
+            if e.detail and e.detail ~= '' then L[#L + 1] = '  ' .. e.detail end
+        end
+    end
+    if rest > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = string.format('还有 %d 条，见 xmoat 提醒页。', rest)
+    end
+    L[#L + 1] = ''
+    L[#L + 1] = '仅供研究，不构成投资建议。'
+    return table.concat(L, '\n')
+end
+
+function g_exports.report_events_text(events, opts)
+    opts = opts or {}
+    local groups, rest = group_events(events, opts.max or 20)
+    local L = { string.format('%s（%d 条）', opts.title or 'xmoat 提醒', #events) }
+    for _, g in ipairs(groups) do
+        L[#L + 1] = ''
+        L[#L + 1] = string.format('【%s %s】', g.name or g.code, g.code)
+        for _, e in ipairs(g.items) do
+            L[#L + 1] = string.format('%s %s', event_icon(e), e.title)
+            if e.detail and e.detail ~= '' then L[#L + 1] = '   ' .. e.detail end
+        end
+    end
+    if rest > 0 then
+        L[#L + 1] = ''
+        L[#L + 1] = string.format('还有 %d 条，见 xmoat 提醒页。', rest)
+    end
+    L[#L + 1] = ''
+    L[#L + 1] = '仅供研究，不构成投资建议。'
     return table.concat(L, '\n')
 end

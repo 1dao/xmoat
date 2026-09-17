@@ -6,7 +6,8 @@
 --   1. load engine/boot.lua and every path in engine/manifest.lua
 --   2. from the MAIN state (__init): xnet.init(), xtimer.init(), engine_start()
 --   3. run commands on coroutines: api_call(name, params, ctx)
---   4. on shutdown: engine_stop()
+--   4. optionally, from the main state: schedule_start() for the daily check
+--   5. on shutdown: engine_stop()
 -- Nothing here listens on a socket or writes to a terminal; that is the host's
 -- business.
 
@@ -23,6 +24,8 @@ function g_exports.engine_start(opts)
     if not ok then return nil, err end
     ok, err = watch_load()
     if not ok then return nil, 'watchlist: ' .. tostring(err) end
+    ok, err = alerts_load()
+    if not ok then return nil, 'alerts: ' .. tostring(err) end
     sched_start(cfg_int('SCHED_TICK_MS', 20))
     commands_install()
     started = true
@@ -33,6 +36,7 @@ end
 
 function g_exports.engine_stop()
     if not started then return end
+    schedule_stop()
     sched_stop()
     started = false
 end

@@ -104,7 +104,7 @@ local function install_watchlist()
 
     api_define({
         name = 'watchlist.refresh', method = 'POST', path = '/api/v1/watchlist/refresh',
-        summary = '依次刷新全部自选股',
+        summary = '依次刷新全部自选股；发现的提醒在后台推送',
         handler = function()
             local results = {}
             for _, e in ipairs(watch_list()) do
@@ -112,6 +112,7 @@ local function install_watchlist()
                 results[#results + 1] = rec and { code = e.code, ok = true }
                     or { code = e.code, ok = false, error = { code = ecode, message = emsg } }
             end
+            alerts_flush_later()
             return util_json_array(results)
         end,
     })
@@ -138,6 +139,7 @@ local function install_stock()
             if not code then return nil, 'bad_request', err end
             local rec, ecode, emsg = stock_refresh(code)
             if not rec then return nil, ecode, emsg end
+            alerts_flush_later()
             return stock_analysis(code)
         end,
     })
@@ -191,8 +193,77 @@ local function install_stock()
     })
 end
 
+local function install_alerts()
+    api_define({
+        name = 'alerts.list', method = 'GET', path = '/api/v1/alerts',
+        summary = '提醒记录，新的在前',
+        params = {
+            code = { type = 'string', doc = '只看这只股票' },
+            limit = { type = 'integer', doc = '默认 50，最多 500' },
+            after_seq = { type = 'integer', doc = '只返回序号大于它的，用于轮询新提醒' },
+        },
+        handler = function(p)
+            local code
+            if p.code then
+                local err
+                code, err = security_code(p.code)
+                if not code then return nil, 'bad_request', err end
+            end
+            local limit = p.limit or 50
+            if limit < 1 or limit > 500 then return nil, 'bad_request', 'limit 应在 1 到 500 之间' end
+            return util_json_array(alerts_list({ code = code, limit = limit, after_seq = p.after_seq }))
+        end,
+    })
+
+    api_define({
+        name = 'alerts.run', method = 'POST', path = '/api/v1/alerts/run',
+        summary = '立即检查：刷新全部自选股，记录变化并推送（与定时检查相同）',
+        handler = function() return alerts_run() end,
+    })
+
+    api_define({
+        name = 'notify.channels', method = 'GET', path = '/api/v1/notify/channels',
+        summary = '已配置的推送渠道（不含密钥）',
+        handler = function()
+            local out = {}
+            for _, ch in ipairs(notify_channels()) do
+                out[#out + 1] = { kind = ch.kind, name = ch.name }
+            end
+            return util_json_array(out)
+        end,
+    })
+
+    api_define({
+        name = 'notify.test', method = 'POST', path = '/api/v1/notify/test',
+        summary = '向每个已配置的渠道发一条测试消息',
+        handler = function()
+            if #notify_channels() == 0 then
+                return nil, 'bad_request', '还没有配置推送渠道，见 xmoat.local.cfg.example'
+            end
+            local sample = { {
+                id = 'test', code = '000000', name = 'xmoat', kind = 'check', status = 'pass',
+                title = '推送测试', detail = '收到这条消息，说明这个渠道配置正确。',
+            } }
+            local results = notify_send({
+                title = 'xmoat 推送测试',
+                markdown = report_events_markdown(sample, { title = 'xmoat 推送测试' }),
+                text = report_events_text(sample, { title = 'xmoat 推送测试' }),
+                events = sample,
+            })
+            return util_json_array(results)
+        end,
+    })
+
+    api_define({
+        name = 'schedule.status', method = 'GET', path = '/api/v1/schedule',
+        summary = '定时检查的配置、上次运行和下次运行时间',
+        handler = function() return schedule_status() end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
     install_watchlist()
     install_stock()
+    install_alerts()
 end

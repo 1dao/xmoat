@@ -145,7 +145,13 @@
     const token = ++renderToken;
     if (activeChart) { activeChart.destroy(); activeChart = null; }
     const m = location.hash.match(/^#\/stock\/([0-9A-Za-z.]+)$/);
+    const page = m ? 'stock' : location.hash === '#/alerts' ? 'alerts' : 'watchlist';
+    for (const link of document.querySelectorAll('[data-nav]')) {
+      if (link.dataset.nav === page) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    }
     if (m) return renderStock(m[1], token);
+    if (page === 'alerts') return renderAlerts(token);
     return renderWatchlist(token);
   }
 
@@ -302,6 +308,7 @@
       qualityCard(a),
       dividendCard(a),
       checksCard(a),
+      recentAlertsCard(a.code, token),
       sourcesLine(a));
     view.focus({ preventScroll: true });
   }
@@ -579,6 +586,119 @@
         h('div', { class: 'detail', text: c.detail || '' })));
     }
     card.append(list, h('p', { class: 'muted small', text: '阈值是经验规则，不是结论：提示意味着值得打开年报看一看。' }));
+    return card;
+  }
+
+  // ── alerts ─────────────────────────────────────────────────────────────────
+
+  const KIND = {
+    report: { icon: '📄', label: '财报' },
+    dividend: { icon: '💰', label: '分红' },
+    band: { icon: '🎯', label: '你的区间' },
+    percentile: { icon: '📊', label: '估值分位' },
+    check: { icon: '🔎', label: '检查清单' },
+  };
+  const PUSHED = { true: '已推送', false: '待推送', skipped: '未配置推送', failed: '推送失败' };
+
+  function alertItem(e, withStock) {
+    const kind = KIND[e.kind] || { icon: '•', label: e.kind };
+    const pushed = PUSHED[String(e.pushed)];
+    const icon = e.kind === 'check' ? (e.status === 'warn' ? '⚠️' : '✅') : kind.icon;
+    return h('li', {},
+      h('span', { class: 'kind', 'aria-hidden': 'true', text: icon }),
+      h('div', { class: 'head' },
+        withStock ? h('a', { class: 'who', href: '#/stock/' + e.code, text: `${e.name || ''} ${e.code}` }) : null,
+        h('span', { class: 'what', text: e.title }),
+        h('span', { class: 'tag', text: kind.label })),
+      h('span', { class: 'when' }, fmtTime(e.created_at), ' ',
+        pushed ? h('span', { class: 'tag' + (e.pushed === 'failed' ? ' is-bad' : ''), text: pushed }) : null),
+      e.detail ? h('div', { class: 'detail', text: e.detail }) : null);
+  }
+
+  async function renderAlerts(token) {
+    document.title = '提醒 · xmoat';
+    setView(loading());
+    let items, channels, schedule;
+    try {
+      [items, channels, schedule] = await Promise.all([
+        api('GET', '/api/v1/alerts?limit=200'),
+        api('GET', '/api/v1/notify/channels'),
+        api('GET', '/api/v1/schedule'),
+      ]);
+    } catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
+    if (stale(token)) return;
+
+    const runBtn = h('button', { class: 'btn btn-primary', text: '立即检查' });
+    runBtn.addEventListener('click', () => busy(runBtn, '检查中…', async () => {
+      const r = await api('POST', '/api/v1/alerts/run');
+      const failed = r.refreshed.filter(x => !x.ok);
+      const parts = [`刷新 ${r.refreshed.length} 只，新提醒 ${r.new_events} 条`];
+      if (r.push && r.push.sent) parts.push(`已推送 ${r.push.sent} 条`);
+      if (failed.length) parts.push('失败：' + failed.map(x => `${x.code} ${x.error.message}`).join('；'));
+      showStatus(parts.join('，'), failed.length > 0);
+      route();
+    }));
+
+    const testBtn = h('button', { class: 'btn', text: '发送测试消息' });
+    testBtn.addEventListener('click', () => busy(testBtn, '发送中…', async () => {
+      const results = await api('POST', '/api/v1/notify/test');
+      showStatus(results.map(r => `${r.name}：${r.ok ? '成功' : r.error}`).join('；'), results.some(r => !r.ok));
+    }));
+
+    const head = h('div', { class: 'page-head' },
+      h('h1', { text: '提醒' }),
+      h('span', { class: 'meta', text: `${items.length} 条` }),
+      h('span', { class: 'spacer' }),
+      channels.length ? testBtn : null, runBtn);
+
+    const kv = h('dl', { class: 'kv' });
+    const row = (k, v) => kv.append(h('dt', { text: k }), h('dd', {}, v));
+    row('推送渠道', channels.length
+      ? h('span', { class: 'channel-list' }, channels.map(c => h('span', { class: 'tag', text: c.name })))
+      : h('span', { class: 'muted', text: '未配置。在 xmoat.local.cfg 里填写企业微信、飞书、钉钉、Telegram 或 Webhook，格式见 xmoat.local.cfg.example。' }));
+    if (schedule.enabled) {
+      const offset = `UTC${schedule.utc_offset >= 0 ? '+' : ''}${schedule.utc_offset}`;
+      row('定时检查', h('span', { text: `星期 ${schedule.weekdays}（1 为周一）的 ${(schedule.times || []).join('、')}（${offset}）` }));
+      row('下次检查', h('span', { class: 'num', text: schedule.running ? '正在检查…' : (schedule.next_run || '—') }));
+    } else {
+      row('定时检查', h('span', { class: 'muted', text: schedule.error ? `配置有误：${schedule.error}` : '未启用（SCHEDULE_ENABLED=0）' }));
+    }
+
+    const settings = h('section', { class: 'card' }, h('h2', { text: '推送与定时' }), kv);
+
+    const list = h('section', { class: 'card' });
+    if (!items.length) {
+      list.append(h('div', { class: 'empty' },
+        h('p', { text: '还没有提醒。' }),
+        h('p', { class: 'muted', text: '刷新自选股时，出现新财报、新分红方案、估值穿过你设的区间或进入历史高低位、检查清单出现新提示，都会记在这里。' })));
+    } else {
+      let day = null;
+      let ul = null;
+      for (const e of items) {
+        const d = fmtTime(e.created_at).slice(0, 10);
+        if (d !== day) {
+          day = d;
+          list.append(h('div', { class: 'day-head', text: d }));
+          ul = h('ul', { class: 'alerts' });
+          list.append(ul);
+        }
+        ul.append(alertItem(e, true));
+      }
+    }
+    setView(head, settings, list);
+  }
+
+  // Loaded after the rest of the page: the analysis stands without it.
+  function recentAlertsCard(code, token) {
+    const card = h('section', { class: 'card', hidden: true });
+    api('GET', `/api/v1/alerts?code=${enc(code)}&limit=10`).then(items => {
+      if (stale(token) || !items.length) return;
+      card.append(
+        h('div', { class: 'card-head' }, h('h2', { text: '最近提醒' }), h('span', { class: 'spacer' }),
+          h('a', { href: '#/alerts', text: '全部提醒' })),
+        h('ul', { class: 'alerts' }, items.map(e => alertItem(e, false))));
+      card.hidden = false;
+    }).catch(() => {});
     return card;
   }
 

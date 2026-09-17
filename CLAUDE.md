@@ -17,6 +17,7 @@ bin/xnet.exe test/unit.lua                 # offline, seconds; exit 0 = all pass
 bin/xnet.exe main.lua                      # HTTP host on 127.0.0.1:8688 (start.bat / start.sh)
 bin/xnet.exe cli.lua report 600519         # Markdown report; `cli.lua` alone lists subcommands
 bin/xnet.exe cli.lua call stock.get code=600519
+bin/xnet.exe cli.lua check                 # refresh the watchlist, record changes, push
 ```
 
 Any config key can be overridden as a `KEY=VAL` argument; precedence is
@@ -60,6 +61,22 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   is a crash once that coroutine is suspended. Use `sched_after` /
   `sched_wait_until` / `sched_sleep`; the one ticker is armed in `engine_start`
   on the main state. Socket callbacks are safe (xnet stores the main state).
+
+## Alerts
+
+- `stock_refresh` records events itself (`events_diff` of the stored copy
+  against the new one, watched stocks only). Every refresh path must go through
+  it: a refresh that skipped recording would consume the difference and the
+  next check would find nothing.
+- Recording and pushing are separate. `alerts_flush` sends everything pending
+  as one digest; with no channel configured it marks events `skipped` so a
+  channel added later does not replay old alerts.
+- `schedule_start` arms an xtimer, so only a host calls it, from the main state
+  (`main.lua` does; `cli.lua` and tests do not).
+- Tests replace the network with `__net_set_transport` and the channel list
+  with `__notify_set_channels`; config cannot be changed after startup.
+- Signing vectors for DingTalk and Feishu in `test/unit.lua` were computed
+  independently (Python hmac); keep them when touching `notify_build`.
 
 ## Data and numbers
 

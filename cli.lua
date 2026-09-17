@@ -42,6 +42,9 @@ local USAGE = [[
   list                      自选列表
   add <代码>                加入自选
   remove <代码>             移出自选
+  check                     立即检查：刷新全部自选股，记录变化并推送
+  alerts [代码]             最近的提醒
+  notify-test               向已配置的推送渠道发送测试消息
   call <命令名> [k=v ...]   调用任意命令，输出 JSON，如 call stock.valuation code=600519 years=5
   commands                  列出全部命令
 ]]
@@ -127,6 +130,41 @@ local function run()
         local res = api_call(args[2], params, { host = 'cli' })
         out(util_json_encode(res) or '{}')
         return res.ok and 0 or 1
+    elseif cmd == 'check' then
+        local r = call('alerts.run', {})
+        if not r then return 1 end
+        local failed = 0
+        for _, x in ipairs(r.refreshed) do
+            if not x.ok then
+                failed = failed + 1
+                err(string.format('%s 刷新失败：%s', x.code, x.error.message))
+            end
+        end
+        out(string.format('刷新 %d 只，新提醒 %d 条，推送 %d 条', #r.refreshed, r.new_events,
+            r.push and r.push.sent or 0))
+        for _, ch in ipairs(r.push and r.push.channels or {}) do
+            out(string.format('  %s：%s', ch.name, ch.ok and '成功' or tostring(ch.error)))
+        end
+        return failed > 0 and 1 or 0
+    elseif cmd == 'alerts' then
+        local items = call('alerts.list', { code = args[2], limit = 30 })
+        if not items then return 1 end
+        if #items == 0 then out('没有提醒。'); return 0 end
+        for _, e in ipairs(items) do
+            out(string.format('%s  %s %s  %s', tostring(e.created_at):sub(1, 10), e.code,
+                e.name or '', e.title))
+            if e.detail and e.detail ~= '' then out('    ' .. e.detail) end
+        end
+        return 0
+    elseif cmd == 'notify-test' then
+        local results = call('notify.test', {})
+        if not results then return 1 end
+        local bad = 0
+        for _, r in ipairs(results) do
+            out(string.format('%s：%s', r.name, r.ok and '成功' or tostring(r.error)))
+            if not r.ok then bad = bad + 1 end
+        end
+        return bad > 0 and 1 or 0
     elseif cmd == 'commands' then
         for _, c in ipairs(api_list()) do
             out(string.format('%-20s %-6s %-36s %s', c.name, c.method or '', c.path or '', c.summary or ''))

@@ -19,10 +19,14 @@ return {
     'engine/quality.lua',    -- quality_*
     'engine/checks.lua',     -- checks_*    the checklist
     'engine/analysis.lua',   -- analysis_*  the object every client renders
+    'engine/report.lua',     -- report_*    Markdown, for the CLI and push channels
+    'engine/events.lua',     -- events_*    what changed between two refreshes
     'engine/store.lua',      -- store_*     JSON files under DATA_DIR
+    'engine/notify.lua',     -- notify_*    push channels
+    'engine/alerts.lua',     -- alerts_*    the alert log, pushing, the check
     'engine/watch.lua',      -- watch_*     the watchlist
     'engine/stock.lua',      -- stock_*     refresh and read one stock
-    'engine/report.lua',     -- report_*    Markdown, for the CLI and push channels
+    'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry
     'engine/commands.lua',   -- commands_*  every command
     'engine/engine.lua',     -- engine_*    start and stop

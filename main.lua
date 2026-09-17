@@ -41,6 +41,17 @@ local function __init()
     http_install_api()
     web_install()
 
+    -- The daily check belongs to a long-running host like this one. A phone
+    -- host would call alerts.run when the OS wakes it instead.
+    if cfg_bool('SCHEDULE_ENABLED', true) then
+        local sok, serr = schedule_start()
+        if not sok then
+            cfg_log_error('schedule: %s', tostring(serr))
+            xthread.stop(1)
+            return
+        end
+    end
+
     ok, err = http_listen()
     if not ok then
         cfg_log_error('%s', tostring(err))

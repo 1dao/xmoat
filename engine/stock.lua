@@ -1,7 +1,7 @@
 -- engine/stock.lua — fetching a stock's source data and keeping it.
 --
 -- Exports: stock_refresh, stock_load, stock_analysis, stock_valuation_series,
---          stock_summary
+--          stock_summary, stock_event_opts
 --
 -- The stored record is SOURCE data in xmoat's field names, never analysis:
 --   { version, code, market, name, industry, org_type, fetched_at,
@@ -136,6 +136,17 @@ function g_exports.stock_refresh(code)
         }
         local sok, swerr = store_save('stock:' .. code, record)
         if not sok then return nil, 'internal', '保存失败：' .. tostring(swerr) end
+
+        -- What changed, recorded here rather than by whoever asked for the
+        -- refresh: see engine/alerts.lua for why every refresh must. Watched
+        -- stocks only, and never allowed to fail the refresh that found it.
+        local watch = watch_get(code)
+        if watch then
+            local eok, eerr = pcall(function()
+                alerts_record(events_diff(old, record, watch, stock_event_opts()))
+            end)
+            if not eok then cfg_log_error('%s: event detection failed: %s', code, tostring(eerr)) end
+        end
         cfg_log_info('%s %s refreshed: %d reports, %d valuation days, %d dividend events',
             code, tostring(record.name), #reports, #record.valuation, #divs)
         return record
@@ -153,6 +164,15 @@ local function dcf_params()
         discount_rate = cfg_num('DCF_DISCOUNT_RATE', 10),
         terminal_growth = cfg_num('DCF_TERMINAL_GROWTH', 3),
         years = cfg_int('DCF_YEARS', 10),
+    }
+end
+
+-- Options for events_diff, from config.
+function g_exports.stock_event_opts()
+    return {
+        dcf = dcf_params(),
+        percentile_low = cfg_num('ALERT_PERCENTILE_LOW', 10),
+        percentile_high = cfg_num('ALERT_PERCENTILE_HIGH', 90),
     }
 end
 
