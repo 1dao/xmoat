@@ -1,0 +1,10 @@
+# LF in the repository and in the working tree, on every platform.
+#
+# start.sh and test/smoke.sh are run by /bin/sh, and a CRLF shebang makes Linux
+# report "bad interpreter: No such file or directory" — naming the shell, not
+# the line ending. Same rule and same reason as ../gitloom.
+* text=auto eol=lf
+
+# The runtime binaries. bin/xnet has no extension, so name the directory.
+*.exe  binary
+bin/*  binary
