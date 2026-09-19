@@ -1,0 +1,216 @@
+-- engine/quote.lua — daily prices, kept locally and extended from the last day
+-- already held.
+--
+-- Exports: quote_load, quote_refresh, quote_series, quote_status, quote_view,
+--          quote_resolve, quote_merge, quote_is_stale
+--
+-- WHY A CACHE AT ALL. Everything technical — moving averages, a chip
+-- distribution, a backtest — reads years of daily bars. Fetching those again
+-- for every report would be a megabyte per stock per look, which is rude to
+-- the data source and unusable on a phone. So a series is fetched once and
+-- afterwards only extended: a refresh asks for the days after the last one
+-- kept, a few hundred bytes.
+--
+-- WHY IT CAN STILL REFETCH EVERYTHING. The series is forward-adjusted, so a
+-- dividend or a split rewrites every past price in it. That is what the
+-- overlap is for: an incremental fetch starts a little before the last day
+-- kept, and if a day present in both copies now has a different close, the two
+-- halves cannot be spliced and the whole history is fetched again. Without
+-- that check a chart would quietly develop a step at the last ex-dividend
+-- date, and every indicator reading across it would be wrong.
+--
+-- An INDEX is the same data under another name: 'idx:000001' is the Shanghai
+-- Composite. It is cached the same way, which is what the market review reads.
+
+local OVERLAP_DAYS = 10          -- calendar days re-fetched to catch adjustment
+local DRIFT = 0.002              -- 0.2%: rounding differs, an adjustment does not
+
+local inflight = {}              -- store key -> true while a fetch runs
+
+-- 'idx:000001' is an index, a bare code is a stock. Returns
+--   { key, kind, sec = { code, market } }
+-- or nil plus a message.
+function g_exports.quote_resolve(code)
+    local idx = tostring(code or ''):match('^idx:(%d%d%d%d%d%d)$')
+    if idx then
+        -- Shenzhen's indices are 399xxx and Beijing's 899xxx; everything else
+        -- quoted this way (000001, 000300, 000688) is Shanghai's.
+        local p3 = idx:sub(1, 3)
+        local market = (p3 == '399' or p3 == '899') and 'SZ' or 'SH'
+        return { key = 'quote:idx:' .. idx, kind = 'index', sec = { code = idx, market = market } }
+    end
+    local sec, err = source_em_security(code)
+    if not sec then return nil, err end
+    return { key = 'quote:' .. sec.code, kind = 'stock', sec = sec }
+end
+
+-- The cached series, or nil. Returns nil plus a message only when the file
+-- exists and cannot be read — a caller must not then overwrite it.
+function g_exports.quote_load(code)
+    local t, err = quote_resolve(code)
+    if not t then return nil, err end
+    return store_load(t.key)
+end
+
+-- Splice `fresh` (oldest first) onto `old`. Returns the merged rows and
+-- whether the overlap disagreed, which means the adjustment changed and the
+-- old rows are no longer comparable with the new ones.
+function g_exports.quote_merge(old, fresh)
+    local drifted = false
+    local by_date = {}
+    for _, r in ipairs(old or {}) do by_date[r.date] = r end
+    for _, r in ipairs(fresh or {}) do
+        local prev = by_date[r.date]
+        if prev and prev.close and r.close and prev.close > 0 then
+            if math.abs(r.close - prev.close) / prev.close > DRIFT then drifted = true end
+        end
+        by_date[r.date] = r
+    end
+    if drifted then return fresh, true end
+    local out = {}
+    for _, r in pairs(by_date) do out[#out + 1] = r end
+    table.sort(out, function(a, b) return a.date < b.date end)
+    return out, false
+end
+
+-- Whether a cached series should be fetched again. Daily bars only change
+-- after the close, but the last one moves while the market is open, so this is
+-- a plain age limit rather than a market calendar the engine does not have.
+function g_exports.quote_is_stale(doc, max_age_min)
+    if not doc or type(doc.rows) ~= 'table' or #doc.rows == 0 then return true end
+    max_age_min = max_age_min or cfg_int('QUOTE_TTL_MIN', 180)
+    if max_age_min <= 0 then return true end
+    local fetched = doc.fetched_at
+    if type(fetched) ~= 'string' then return true end
+    -- Both sides are util_now_iso, which is UTC: comparing against a local
+    -- date here would make a cache look eight hours older or younger than it
+    -- is, depending on the machine's timezone.
+    local now = util_now_iso()
+    local days = util_date_diff_days(fetched:sub(1, 10), now:sub(1, 10))
+    if days == nil then return true end
+    local function minutes(s)
+        local h, m = s:match('T(%d%d):(%d%d)')
+        return (tonumber(h) or 0) * 60 + (tonumber(m) or 0)
+    end
+    local age = days * 24 * 60 + minutes(now) - minutes(fetched)
+    return age >= max_age_min
+end
+
+-- COROUTINE-ONLY. Fetch the days that are missing and store the result.
+-- Returns the document, or nil plus (error code, message).
+--
+-- opts = { full = true } forces the whole history rather than an extension.
+function g_exports.quote_refresh(code, opts)
+    opts = opts or {}
+    local t, terr = quote_resolve(code)
+    if not t then return nil, 'bad_request', terr end
+
+    if inflight[t.key] then
+        sched_wait_until(function() return not inflight[t.key] end, 120000)
+        local kept = store_load(t.key)
+        if kept then return kept end
+        return nil, 'upstream', '并发的行情刷新失败了'
+    end
+    inflight[t.key] = true
+    local ok, doc, ecode, emsg = pcall(function()
+        local old, lerr = store_load(t.key)
+        if lerr then cfg_log_warn('%s: cached prices unreadable, refetching all: %s', t.key, lerr) end
+        local rows = (not opts.full) and old and type(old.rows) == 'table' and old.rows or {}
+        local last = rows[#rows] and rows[#rows].date
+
+        local from = last and util_date_add_days(last, -OVERLAP_DAYS) or nil
+        local res, err = source_em_fetch_kline(t.sec, from)
+        if not res then return nil, 'upstream', '行情获取失败：' .. tostring(err) end
+        if #res.rows == 0 and #rows == 0 then
+            return nil, 'not_found', tostring(code) .. ' 没有行情数据'
+        end
+
+        local merged, drifted = quote_merge(rows, res.rows)
+        if drifted then
+            -- Forward adjustment changed: everything held is on the old basis.
+            cfg_log_info('%s: adjustment changed, refetching the whole series', t.key)
+            local all, aerr = source_em_fetch_kline(t.sec, nil)
+            if not all then return nil, 'upstream', '重新抓取全部行情失败：' .. tostring(aerr) end
+            merged = all.rows
+            res.name = all.name or res.name
+        end
+
+        -- Keep the newest QUOTE_MAX_DAYS. Four years covers a 250-day average,
+        -- a chip distribution and a backtest over several cycles; the whole
+        -- history would be six times that for a stock listed in the nineties.
+        local max_days = cfg_int('QUOTE_MAX_DAYS', 1200)
+        if max_days > 0 and #merged > max_days then
+            local cut = {}
+            for i = #merged - max_days + 1, #merged do cut[#cut + 1] = merged[i] end
+            merged = cut
+        end
+
+        local doc2 = {
+            version = 1,
+            code = t.sec.code, kind = t.kind,
+            name = res.name or (old and old.name),
+            adjust = 'qfq',
+            fetched_at = util_now_iso(),
+            first_date = merged[1] and merged[1].date,
+            last_date = merged[#merged] and merged[#merged].date,
+            rows = util_json_array(merged),
+        }
+        local sok, swerr = store_save(t.key, doc2)
+        if not sok then return nil, 'internal', '保存行情失败：' .. tostring(swerr) end
+        cfg_log_info('%s %s prices: %d days to %s%s', t.key, tostring(doc2.name),
+            #merged, tostring(doc2.last_date), drifted and ' (refetched)' or '')
+        return doc2
+    end)
+    inflight[t.key] = nil
+    if not ok then
+        cfg_log_error('%s price refresh raised: %s', tostring(code), tostring(doc))
+        return nil, 'internal', '刷新行情时出错'
+    end
+    return doc, ecode, emsg
+end
+
+-- COROUTINE-ONLY. The series every other module reads: cached when it is
+-- recent enough, fetched or extended when it is not. A fetch that fails while
+-- something usable is cached returns the cached copy and logs — a stale close
+-- is worth more than no technical section at all.
+--
+-- opts = { force = true, max_age_min = n, offline = true }
+function g_exports.quote_series(code, opts)
+    opts = opts or {}
+    local doc, lerr = quote_load(code)
+    if lerr then cfg_log_warn('%s', lerr) end
+    if opts.offline then return doc end
+    if not opts.force and not quote_is_stale(doc, opts.max_age_min) then return doc end
+    local fresh, ecode, emsg = quote_refresh(code, opts)
+    if fresh then return fresh end
+    if doc then
+        cfg_log_warn('%s: using the cached prices (%s): %s', tostring(code),
+            tostring(doc.last_date), tostring(emsg))
+        return doc
+    end
+    return nil, ecode, emsg
+end
+
+-- What is cached, without the rows: for a status line and for deciding
+-- whether a refresh is worth asking for.
+function g_exports.quote_status(code)
+    local doc = quote_load(code)
+    if not doc then return nil end
+    return { code = doc.code, kind = doc.kind, name = doc.name, adjust = doc.adjust,
+             fetched_at = doc.fetched_at, first_date = doc.first_date,
+             last_date = doc.last_date, days = #(doc.rows or {}),
+             stale = quote_is_stale(doc) }
+end
+
+-- The document as a client sees it: the newest `days` rows, or none when days
+-- is 0, which is all a status panel needs.
+function g_exports.quote_view(doc, days)
+    local rows = doc.rows or {}
+    local out = {}
+    if days and days > 0 then
+        for i = math.max(1, #rows - days + 1), #rows do out[#out + 1] = rows[i] end
+    end
+    return { code = doc.code, kind = doc.kind, name = doc.name, adjust = doc.adjust,
+             fetched_at = doc.fetched_at, first_date = doc.first_date,
+             last_date = doc.last_date, days = #rows, rows = util_json_array(out) }
+end

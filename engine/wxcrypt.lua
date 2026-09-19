@@ -1,6 +1,6 @@
 -- engine/wxcrypt.lua — the envelope WeCom wraps a callback in.
 --
--- Exports: wxcrypt_config, wxcrypt_signature, wxcrypt_open
+-- Exports: wxcrypt_config, wxcrypt_signature, wxcrypt_open, __wxcrypt_set_config
 --
 -- WHY THIS IS HERE AT ALL. The app channel (engine/notify.lua) is refused from
 -- an address the company has not declared trusted — "errcode 60020: not allow
@@ -47,7 +47,18 @@ end
 
 -- The callback's configuration, or nil — plus a reason when the keys are there
 -- but unusable, so a typo is reported instead of silently serving nothing.
+local override = nil
+
+-- Tests set the configuration directly (false = not configured, nil = read it
+-- again): config is read-only once running, and a machine that really has a
+-- callback configured would otherwise install the route with its own keys and
+-- fail every check against the published vector.
+function g_exports.__wxcrypt_set_config(conf)
+    override = conf
+end
+
 function g_exports.wxcrypt_config()
+    if override ~= nil then return override or nil end
     local token, encoded = cfg_str('WECOM_CALLBACK_TOKEN'), cfg_str('WECOM_CALLBACK_AES_KEY')
     if not token and not encoded then return nil end
     local corp = cfg_str('WECOM_CORP_ID')

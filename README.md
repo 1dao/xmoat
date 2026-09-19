@@ -277,6 +277,7 @@ xmoat/
     checks.lua           检查清单与阈值
     analysis.lua         分析对象：所有客户端展示的那一个结构
     store.lua  watch.lua  stock.lua   存储、自选、抓取与增量合并
+    quote.lua            日线行情本地缓存：只补最后一天之后的部分
     report.lua           分析对象 → Markdown；提醒 → 推送消息
     events.lua           刷新前后对比：财报、分红、区间、估值分位、检查清单
     alerts.lua           提醒记录、推送、立即检查

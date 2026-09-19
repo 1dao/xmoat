@@ -347,6 +347,9 @@ local function fixture_transport(url)
         return body('em_empty.json')
     elseif url:find('zcfzbAjaxNew', 1, true) then
         return body('em_balance_600519.json')
+    elseif url:find('/qt/stock/kline/get', 1, true) then
+        if url:find('secid=1.600519', 1, true) then return body('em_kline_600519.json') end
+        return body('em_kline_empty.json')
     elseif url:find('BusinessAnalysis', 1, true) then
         if url:find('600519', 1, true) then return body('em_business_600519.json') end
         return { status = 200, headers = {}, body = '{"zyfw":[],"zygcfx":[],"jyps":[]}' }
@@ -625,8 +628,14 @@ local function test_wecom_callback()
     local msg, why = wxcrypt_open(other, SIG, TS, NONCE, ECHO)
     check('a receiveid from another company is refused', msg == nil and why == 'receiveid is another company', why)
 
+    -- Through wxcrypt_config, so the install path a host takes is the one
+    -- tested — and so a machine with a callback of its own configured does not
+    -- register the route with its keys and fail every check below.
+    __wxcrypt_set_config(false)
     eq('without keys there is no route', wecom_install(), false)
-    check('the route installs with a conf', wecom_install(conf))
+    __wxcrypt_set_config(conf)
+    check('the route installs once the keys are there', wecom_install())
+    __wxcrypt_set_config(nil)
 
     local path = cfg_get('WECOM_CALLBACK_PATH', '/wecom/callback')
     local function req(method, query, body)
@@ -769,6 +778,71 @@ local function market_page(rows, count, page_size)
     for _, r in ipairs(rows) do data[#data + 1] = r end
     return { result = { data = data, count = count or #rows,
                         pages = math.ceil((count or #rows) / (page_size or 2000)) } }
+end
+
+local function test_quote()
+    section('daily prices')
+    local k = source_em_parse_kline(fixture('em_kline_600519.json'))
+    eq('every recorded day is parsed', #k.rows, 11)
+    eq('the name comes with them', k.name, '贵州茅台')
+    -- Eastmoney sends date,open,CLOSE,high,low — not OHLC. The 4th of
+    -- September opened at 1295.88 and closed at 1330.00, the high of the run.
+    local d4
+    for _, r in ipairs(k.rows) do if r.date == '2026-09-04' then d4 = r end end
+    eq('open is open', d4.open, 1295.88)
+    eq('close is not the second field by accident', d4.close, 1330.00)
+    eq('high is the high', d4.high, 1338.86)
+    eq('low is the low', d4.low, 1295.60)
+    eq('volume is in 手', d4.volume, 45416)
+    eq('turnover comes from the eleventh field', d4.turnover, 0.36)
+    eq('and the change in percent from the ninth', d4.change_pct, 2.40)
+    check('rows are oldest first', k.rows[1].date < k.rows[#k.rows].date)
+    eq('a security with no history is empty, not an error',
+        #source_em_parse_kline(fixture('em_kline_empty.json')).rows, 0)
+
+    eq('a stock resolves to its own file', quote_resolve('SH600519').key, 'quote:600519')
+    eq('an index has its own namespace, since 000001 is also a stock',
+        quote_resolve('idx:000001').key, 'quote:idx:000001')
+    eq('Shanghai indices are secid 1', source_em_secid(quote_resolve('idx:000001').sec), '1.000001')
+    eq('Shenzhen indices are secid 0', source_em_secid(quote_resolve('idx:399001').sec), '0.399001')
+    eq('a Shenzhen stock too', source_em_secid(quote_resolve('000001').sec), '0.000001')
+
+    -- Extending a series: the overlap agrees, so the halves splice.
+    local old = { { date = '2026-09-01', close = 10 }, { date = '2026-09-02', close = 11 } }
+    local merged, drifted = quote_merge(old, { { date = '2026-09-02', close = 11 },
+                                               { date = '2026-09-03', close = 12 } })
+    eq('an extension keeps what was held', #merged, 3)
+    eq('and ends at the new day', merged[3].date, '2026-09-03')
+    check('no adjustment change was seen', not drifted)
+    -- A dividend rewrites the whole forward-adjusted series: the same day now
+    -- closes lower, so the old rows cannot be spliced onto the new ones.
+    local after, drift2 = quote_merge(old, { { date = '2026-09-02', close = 10.5 },
+                                             { date = '2026-09-03', close = 11.4 } })
+    check('a changed adjustment is caught', drift2)
+    eq('and only the fresh rows survive it', #after, 2)
+
+    eq('an empty cache is stale', quote_is_stale(nil), true)
+    local now = util_now_iso()
+    check('a series fetched just now is not',
+        not quote_is_stale({ fetched_at = now, rows = { { date = '2026-09-01' } } }, 180))
+    check('one fetched yesterday is',
+        quote_is_stale({ fetched_at = util_date_add_days(now:sub(1, 10), -1) .. now:sub(11),
+                         rows = { { date = '2026-09-01' } } }, 180))
+
+    __net_set_transport(fixture_transport)
+    local r = api_call('quote.refresh', { code = '600519' })
+    check('a refresh stores the series', r.ok, r.error and r.error.message)
+    eq('which knows its last day', r.ok and r.data.last_date, '2026-09-15')
+    eq('the head alone comes back from a refresh', r.ok and #r.data.rows, 0)
+    local g = api_call('quote.get', { code = '600519', days = 3, offline = true })
+    eq('a read serves the cache', g.ok and g.data.days, 11)
+    eq('cut to the days asked for', g.ok and #g.data.rows, 3)
+    eq('newest last', g.ok and g.data.rows[3].date, '2026-09-15')
+    eq('a security the source has no prices for is not_found',
+        api_call('quote.refresh', { code = '000002' }).error.code, 'not_found')
+    eq('and an offline read of a stock never fetched says so',
+        api_call('quote.get', { code = '000002', offline = true }).error.code, 'not_fetched')
+    __net_set_transport(nil)
 end
 
 local function test_market()
@@ -1181,6 +1255,7 @@ local function run_all()
     test_insurer()
     test_broker()
     test_market()
+    test_quote()
 end
 
 return {

@@ -61,6 +61,8 @@
 | `stock.refresh` | `POST /api/v1/stocks/:code/refresh` | — | `Analysis`（先抓取再分析） |
 | `stock.valuation` | `GET /api/v1/stocks/:code/valuation` | `metric?`，`years?`，`max_points?` | `ValuationSeries` |
 | `stock.reports` | `GET /api/v1/stocks/:code/reports` | `period_type?`，`limit?` | 定期报告主要指标（原始口径） |
+| `quote.get` | `GET /api/v1/stocks/:code/quotes` | `days?`（默认 250），`offline?` | `Quotes`；本地缓存够新就直接返回 |
+| `quote.refresh` | `POST /api/v1/stocks/:code/quotes/refresh` | `full?` | `Quotes`（不含 rows）；已有缓存时只抓最后一天之后的部分 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
 | `alerts.run` | `POST /api/v1/alerts/run` | — | `RunResult`：刷新全部自选、记录变化并推送，和定时检查相同 |
 | `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
@@ -73,6 +75,11 @@
 | `insight.get` | `GET /api/v1/stocks/:code/insight` | — | `Insight`（已保存的，不联网）；没有则 `not_found` |
 | `insight.generate` | `POST /api/v1/stocks/:code/insight` | — | `Insight`（调用大模型，会产生费用） |
 | `insight.ask` | `POST /api/v1/stocks/:code/ask` | `question`（≤500 字），`history?` | `{answer, unverified, provider, model, usage}` |
+
+**行情是怎么缓存的。** 日线（前复权）抓一次就留在本地，之后只补最后一天之后的部分：
+`quote.get` 先看缓存，够新（`QUOTE_TTL_MIN`，默认 3 小时）就直接返回，不够新才联网补齐，
+`offline=true` 则只读缓存。前复权序列会被分红和送转改写，所以增量抓取会多要十天作为重叠段，
+重叠的那几天收盘价对不上就说明复权变了，整段重抓。`:code` 也可以是 `idx:000001` 这样的指数。
 
 **提醒是怎么产生的。** 每次刷新一只自选股（手动、`watchlist.refresh`、`alerts.run` 或定时检查），
 引擎都会比较刷新前后的数据并记录变化；`stock.refresh` 和 `watchlist.refresh` 在返回后于后台推送，
@@ -235,6 +242,22 @@ type Alert = {
   created_at: string,
   pushed: true | false | 'skipped' | 'failed',   // skipped = 当时没有配置渠道
   pushed_at?: string, push_attempts?: number,
+}
+
+type Quotes = {                             // 日线，前复权
+  code: string, kind: 'stock' | 'index', name: string,
+  adjust: 'qfq',
+  fetched_at: string,                       // 这份缓存是什么时候抓的
+  first_date: string, last_date: string,    // 缓存覆盖的区间
+  days: number,                             // 缓存里一共多少个交易日
+  rows: {
+    date: string,
+    open: number, high: number, low: number, close: number,
+    volume: number,                         // 手
+    amount: number,                         // 元
+    change_pct: number,                     // %
+    turnover: number,                       // 换手率 %
+  }[],                                      // 由旧到新，只含请求的 days 条
 }
 
 type PushResult = {

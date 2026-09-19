@@ -318,6 +318,43 @@ local function install_insight()
     })
 end
 
+local function install_quote()
+    api_define({
+        name = 'quote.get', method = 'GET', path = '/api/v1/stocks/:code/quotes',
+        summary = '日线行情（前复权）。本地有且够新就直接返回，否则先补最新的几天',
+        params = {
+            code = code_param('6 位股票代码，或 idx:000001 这样的指数'),
+            days = { type = 'integer', doc = '最多返回多少个交易日，默认 250' },
+            offline = { type = 'boolean', doc = '只读本地缓存，不联网' },
+        },
+        handler = function(p)
+            if p.days and (p.days < 1 or p.days > 5000) then
+                return nil, 'bad_request', 'days 应在 1 到 5000 之间'
+            end
+            local doc, ecode, emsg = quote_series(p.code, { offline = p.offline })
+            if not doc then
+                if p.offline then return nil, 'not_fetched', '本地没有行情缓存，先调用 quote.refresh' end
+                return nil, ecode or 'upstream', emsg or '行情获取失败'
+            end
+            return quote_view(doc, p.days or 250)
+        end,
+    })
+
+    api_define({
+        name = 'quote.refresh', method = 'POST', path = '/api/v1/stocks/:code/quotes/refresh',
+        summary = '抓取日线行情：已有缓存时只取最后一天之后的部分',
+        params = {
+            code = code_param('6 位股票代码，或 idx:000001 这样的指数'),
+            full = { type = 'boolean', doc = '忽略缓存，重新抓取全部历史' },
+        },
+        handler = function(p)
+            local doc, ecode, emsg = quote_refresh(p.code, { full = p.full })
+            if not doc then return nil, ecode or 'upstream', emsg or '行情获取失败' end
+            return quote_view(doc, 0)
+        end,
+    })
+end
+
 local function install_market()
     api_define({
         name = 'market.status', method = 'GET', path = '/api/v1/market',
@@ -385,6 +422,7 @@ end
 function g_exports.commands_install()
     install_system()
     install_market()
+    install_quote()
     install_watchlist()
     install_stock()
     install_alerts()

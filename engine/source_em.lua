@@ -3,8 +3,10 @@
 -- Exports: source_em_security,
 --          source_em_parse_reports, source_em_parse_valuation,
 --          source_em_parse_balance, source_em_parse_dividends, source_em_parse_business,
+--          source_em_parse_kline,
 --          source_em_fetch_reports, source_em_fetch_valuation,
---          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business
+--          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business,
+--          source_em_fetch_kline, source_em_secid
 --
 -- Everything this file returns is in xmoat's own field names. Nothing outside
 -- it knows that Eastmoney calls weighted ROE `ROEJQ`, so a second source
@@ -493,4 +495,89 @@ function g_exports.source_em_fetch_dividends(sec)
     local doc, err = net_get_json(url)
     if not doc then return nil, err end
     return source_em_parse_dividends(doc)
+end
+
+-- ---------------------------------------------------------------------------
+-- Daily prices: push2his kline (日 K 线)
+--
+-- The valuation table above already carries a daily close, but nothing else:
+-- no high, no low, no volume and no turnover rate. Technical work needs all
+-- four — a chip distribution is built out of turnover, and a support level out
+-- of lows — so prices come from the quote server instead.
+--
+-- FORWARD-ADJUSTED (fqt=1), because an indicator computed across an
+-- ex-dividend gap is measuring the dividend, not the market. The cost is that
+-- the whole series is rewritten every time a company pays one: engine/quote.lua
+-- checks for that on each incremental fetch rather than silently splicing two
+-- differently-adjusted halves together.
+--
+-- A row is "date,open,close,high,low,volume,amount,amplitude,change_pct,
+-- change,turnover" — Eastmoney's own order, which is not OHLC.
+-- ---------------------------------------------------------------------------
+
+local KLINE = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
+-- The quote server's public key for anonymous requests; the same constant
+-- every Eastmoney page sends.
+local KLINE_UT = 'fa5fd1943c7b386f172d6893dbfba10b'
+
+-- Eastmoney's id for a security: 1 is Shanghai, 0 is Shenzhen and Beijing.
+function g_exports.source_em_secid(sec)
+    return (sec.market == 'SH' and '1.' or '0.') .. sec.code
+end
+
+-- Split on commas keeping empty fields: a missing turnover rate arrives as
+-- ",," and dropping it would shift every field after it.
+local function fields(line)
+    local out, from = {}, 1
+    while true do
+        local at = line:find(',', from, true)
+        if not at then out[#out + 1] = line:sub(from); return out end
+        out[#out + 1] = line:sub(from, at - 1)
+        from = at + 1
+    end
+end
+
+-- Returns { code, name, rows = { oldest first } } or nil plus a message.
+function g_exports.source_em_parse_kline(doc)
+    local d = type(doc) == 'table' and doc.data or nil
+    -- A security with no history at all (a fresh listing, a wrong secid)
+    -- answers data: null rather than an empty list.
+    if d == nil or d == util_null then return { rows = {} } end
+    if type(d) ~= 'table' or type(d.klines) ~= 'table' then
+        return nil, 'unexpected response shape (no data.klines)'
+    end
+    local out = {}
+    for _, line in ipairs(d.klines) do
+        local f = fields(tostring(line))
+        local date = day(f[1])
+        if date and #f >= 11 then
+            -- The numbers arrive as text in one comma-separated line, and
+            -- util_num refuses a numeric string on purpose, so each is
+            -- converted here and then gated.
+            local function n(v) return num(tonumber(v)) end
+            out[#out + 1] = {
+                date = date,
+                open = n(f[2]), close = n(f[3]), high = n(f[4]), low = n(f[5]),
+                volume = n(f[6]),          -- 手 (100 shares)
+                amount = n(f[7]),          -- yuan
+                change_pct = n(f[9]),      -- percent
+                turnover = n(f[11]),       -- percent of free float traded
+            }
+        end
+    end
+    table.sort(out, function(a, b) return a.date < b.date end)
+    return { code = str(d.code), name = str(d.name), rows = out }
+end
+
+-- `from` limits the fetch to a date (YYYY-MM-DD) onwards; nil asks for
+-- everything the server has, which for an old stock is some 6,000 days.
+function g_exports.source_em_fetch_kline(sec, from)
+    local beg = from and (from:gsub('%-', '')) or '0'
+    local url = KLINE .. '?secid=' .. source_em_secid(sec) .. '&ut=' .. KLINE_UT ..
+        '&fields1=f1,f2,f3,f4,f5,f6' ..
+        '&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61' ..
+        '&klt=101&fqt=1&beg=' .. beg .. '&end=20500101'
+    local doc, err = net_get_json(url, { timeout_ms = from and nil or 60000 })
+    if not doc then return nil, err end
+    return source_em_parse_kline(doc)
 end

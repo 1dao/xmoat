@@ -13,6 +13,7 @@
 --   <DATA_DIR>/state.json           scheduler bookkeeping
 --   <DATA_DIR>/market.json          the whole-market snapshot for screening
 --   <DATA_DIR>/stocks/<code>.json
+--   <DATA_DIR>/quotes/<code>.json    daily prices; idx-<code>.json for an index
 --   <DATA_DIR>/insights/<code>.json  language-model readings, kept apart from
 --                                    source data on purpose
 --
@@ -24,7 +25,7 @@ local root = nil
 -- MAIN STATE or anywhere: no yield. `dir` overrides DATA_DIR.
 function g_exports.store_init(dir)
     root = dir or cfg_get('DATA_DIR', 'data')
-    for _, sub in ipairs({ 'stocks', 'insights' }) do
+    for _, sub in ipairs({ 'stocks', 'quotes', 'insights' }) do
         local ok, err = util_dir_make(util_path_join(root, sub))
         if not ok then return nil, string.format('cannot create %s: %s', root, tostring(err)) end
     end
@@ -51,6 +52,12 @@ local function path_of(name)
     end
     local code = name:match('^stock:(%d%d%d%d%d%d)$')
     if code then return store_stock_path(code) end
+    code = name:match('^quote:(%d%d%d%d%d%d)$')
+    if code then return util_path_join(root, 'quotes', code .. '.json') end
+    -- An index code can be a stock code as well (000001 is both the Shanghai
+    -- Composite and 平安银行), so indices are kept under their own prefix.
+    code = name:match('^quote:idx:(%d%d%d%d%d%d)$')
+    if code then return util_path_join(root, 'quotes', 'idx-' .. code .. '.json') end
     code = name:match('^insight:(%d%d%d%d%d%d)$')
     if code then return util_path_join(root, 'insights', code .. '.json') end
     error('store: unknown document ' .. tostring(name), 3)
