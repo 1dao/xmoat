@@ -63,6 +63,8 @@
 | `stock.reports` | `GET /api/v1/stocks/:code/reports` | `period_type?`，`limit?` | 定期报告主要指标（原始口径） |
 | `quote.get` | `GET /api/v1/stocks/:code/quotes` | `days?`（默认 250），`offline?` | `Quotes`；本地缓存够新就直接返回 |
 | `quote.refresh` | `POST /api/v1/stocks/:code/quotes/refresh` | `full?` | `Quotes`（不含 rows）；已有缓存时只抓最后一天之后的部分 |
+| `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
+| `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
 | `alerts.run` | `POST /api/v1/alerts/run` | — | `RunResult`：刷新全部自选、记录变化并推送，和定时检查相同 |
 | `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
@@ -292,6 +294,58 @@ type Check = {
   status: 'pass' | 'warn' | 'na',           // na = 数据不足，不等于通过
   detail: string,                           // 带数字和报告期的一句话
   value?: number, values?: object, threshold?: number, period?: string,
+}
+```
+
+### Review
+
+三段式复盘，口径见 [METRICS.md](METRICS.md#复盘与-regime)。指数来自日线缓存（和个股同一套缓存规则），
+板块表单独缓存；`offline=true` 时两者都只读本地。
+
+```ts
+type Review = {
+  generated_at: string, as_of?: string,     // as_of 是指数最后一个交易日
+  market: {
+    indexes: {
+      code: string, name?: string, date: string,
+      close: number, change_pct?: number,
+      ma20?: number, ma60?: number, ma250?: number,
+      position_250?: number, from_high?: number, volume_ratio?: number,
+    }[],
+    regime_index: string,
+    regime: {
+      state: 'bull' | 'bear' | 'range' | 'unknown',
+      close?: number, ma20?: number, ma60?: number, ma250?: number,
+      ma250_slope?: number,                 // MA250 近 60 个交易日的变化 %
+      drawdown?: number, volatility?: number,   // 距 250 日高点 %；近 20 日年化波动 %
+      reasons: string[],                    // 这个判断是怎么来的
+    },
+    stance: { position: string, text: string, note: string },   // 机械映射，不是建议
+  },
+  structure: {
+    fetched_at?: string, source?: string, sector_count?: number,
+    breadth?: { up: number, down: number, flat: number, total: number, ratio?: number },
+    leaders?: Sector[], laggards?: Sector[],
+    note?: string,                          // 没有板块行情时的原因
+  },
+  watchlist: {
+    count: number,
+    rows: {
+      code: string, name?: string, date?: string,
+      close?: number, change_pct?: number,
+      percentile?: number,                  // 锚指标的全历史分位
+      warnings: number,
+      flags: string[],                      // 已进入买入区间 / 跌破止损价 / 达到目标价
+    }[],
+  },
+}
+
+type Sector = {
+  code: string, name: string,
+  index?: number, change_pct?: number,
+  up?: number, down?: number,               // 该板块内涨跌家数
+  leader?: string, leader_change?: number,
+  laggard?: string, laggard_change?: number,
 }
 ```
 

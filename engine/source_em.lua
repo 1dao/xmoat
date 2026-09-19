@@ -6,7 +6,8 @@
 --          source_em_parse_kline,
 --          source_em_fetch_reports, source_em_fetch_valuation,
 --          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business,
---          source_em_fetch_kline, source_em_secid
+--          source_em_fetch_kline, source_em_secid,
+--          source_em_parse_sectors, source_em_fetch_sectors
 --
 -- Everything this file returns is in xmoat's own field names. Nothing outside
 -- it knows that Eastmoney calls weighted ROE `ROEJQ`, so a second source
@@ -580,4 +581,109 @@ function g_exports.source_em_fetch_kline(sec, from)
     local doc, err = net_get_json(url, { timeout_ms = from and nil or 60000 })
     if not doc then return nil, err end
     return source_em_parse_kline(doc)
+end
+
+-- ---------------------------------------------------------------------------
+-- Sectors: the quote server's board list (板块行情)
+--
+-- One row per industry board, which is how the market's day is usually read:
+-- what led, what lagged, and how many companies in each rose or fell. The
+-- boards are Eastmoney's own classification — a stock belongs to exactly one
+-- of them — so the rise and fall counts add up to the market's breadth.
+--
+-- TWO HOSTS. push2 is the live quote server and push2delay the delayed one
+-- (about a quarter of an hour behind). The live host answers 502 from some
+-- networks, and a review written after the close does not care about a
+-- quarter of an hour, so the delayed host is a fallback rather than a failure.
+-- ---------------------------------------------------------------------------
+
+local CLIST_HOSTS = { 'https://push2.eastmoney.com', 'https://push2delay.eastmoney.com' }
+local CLIST_UT = 'bd1d9ddb04089700cf9c27f6f7426281'
+
+-- Boards, as the quote server numbers them: t:2 is 行业板块, t:3 概念板块.
+local SECTOR_FS = { industry = 'm%3A90%2Bt%3A2', concept = 'm%3A90%2Bt%3A3' }
+
+-- A field is '-' when the server has no value for it, which tonumber rejects
+-- for us.
+local function qnum(v) return num(tonumber(v)) end
+
+function g_exports.source_em_parse_sectors(doc)
+    local d = type(doc) == 'table' and doc.data or nil
+    if d == nil or d == util_null then return { rows = {}, count = 0 } end
+    if type(d) ~= 'table' or type(d.diff) ~= 'table' then
+        return nil, 'unexpected response shape (no data.diff)'
+    end
+    local out = {}
+    for _, r in ipairs(d.diff) do
+        local code, name = str(r.f12), str(r.f14)
+        if code and name then
+            out[#out + 1] = {
+                code = code, name = name,
+                index = qnum(r.f2),              -- the board's own index level
+                change_pct = qnum(r.f3),
+                up = qnum(r.f104), down = qnum(r.f105),
+                leader = str(r.f128), leader_change = qnum(r.f136),
+                laggard = str(r.f207), laggard_change = qnum(r.f222),
+            }
+        end
+    end
+    table.sort(out, function(a, b)
+        return (a.change_pct or -1e9) > (b.change_pct or -1e9)
+    end)
+    return { rows = out, count = tonumber(d.total) or #out }
+end
+
+-- A hundred rows is this endpoint's page, whatever pz asks for, so the board
+-- table is five requests. It is paged rather than truncated because the point
+-- of the table is both ends of it: the top hundred by change are all the
+-- boards that rose, and reading the bottom of that page as "the laggards"
+-- would be wrong on any day the market was up.
+local SECTOR_PAGE = 100
+
+-- `kind` is 'industry' (the default) or 'concept'. COROUTINE-ONLY.
+function g_exports.source_em_fetch_sectors(kind, max_pages)
+    local fs = SECTOR_FS[kind or 'industry']
+    if not fs then return nil, 'unknown sector kind ' .. tostring(kind) end
+    local function url_for(host, page)
+        return host .. '/api/qt/clist/get?ut=' .. CLIST_UT ..
+            '&pn=' .. tostring(page) .. '&pz=' .. SECTOR_PAGE ..
+            '&po=1&np=1&fltt=2&invt=2&fid=f3&fs=' .. fs ..
+            '&fields=f2,f3,f12,f14,f104,f105,f128,f136,f207,f222'
+    end
+
+    -- The first page also decides which host answers at all.
+    local first, host, last
+    for _, h in ipairs(CLIST_HOSTS) do
+        local doc, err = net_get_json(url_for(h, 1), { timeout_ms = 20000 })
+        if doc then
+            local parsed, perr = source_em_parse_sectors(doc)
+            if parsed then first, host = parsed, h; break end
+            last = perr
+        else
+            last = err
+        end
+    end
+    if not first then return nil, tostring(last) end
+
+    local rows, seen = first.rows, {}
+    for _, r in ipairs(rows) do seen[r.code] = true end
+    local pages = math.min(max_pages or 10, math.ceil((first.count or #rows) / SECTOR_PAGE))
+    for page = 2, pages do
+        sched_sleep(cfg_int('NET_PACE_MS', 200))
+        local doc, err = net_get_json(url_for(host, page), { timeout_ms = 20000 })
+        local parsed = doc and source_em_parse_sectors(doc)
+        if not parsed then
+            -- Partial is still usable for the leaders; the caller is told how
+            -- many boards it got out of how many exist.
+            cfg_log_warn('板块行情第 %d 页获取失败：%s', page, tostring(err))
+            break
+        end
+        for _, r in ipairs(parsed.rows) do
+            if not seen[r.code] then seen[r.code] = true; rows[#rows + 1] = r end
+        end
+    end
+    table.sort(rows, function(a, b)
+        return (a.change_pct or -1e9) > (b.change_pct or -1e9)
+    end)
+    return { rows = rows, count = first.count, host = host }
 end

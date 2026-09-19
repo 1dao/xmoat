@@ -347,6 +347,8 @@ local function fixture_transport(url)
         return body('em_empty.json')
     elseif url:find('zcfzbAjaxNew', 1, true) then
         return body('em_balance_600519.json')
+    elseif url:find('/qt/clist/get', 1, true) then
+        return body('em_sectors.json')
     elseif url:find('/qt/stock/kline/get', 1, true) then
         if url:find('secid=1.600519', 1, true) then return body('em_kline_600519.json') end
         return body('em_kline_empty.json')
@@ -971,6 +973,65 @@ local function test_quote()
     __net_set_transport(nil)
 end
 
+local function test_review()
+    section('daily review')
+    local sect = source_em_parse_sectors(fixture('em_sectors.json'))
+    eq('every board row is parsed', #sect.rows, 12)
+    eq('and the table says how many there are in all', sect.count, 496)
+    eq('boards come back strongest first', sect.rows[1].name, '其他医疗服务')
+    eq('with their own change', sect.rows[1].change_pct, 6.72)
+    eq('the advancing count', sect.rows[1].up, 5)
+    eq('the declining count', sect.rows[1].down, 0)
+    eq('the board leader', sect.rows[1].leader, '南华生物')
+    eq('and its change', sect.rows[1].leader_change, 10.0)
+    eq('a board with no rows at all is empty, not an error',
+        #source_em_parse_sectors({ data = util_null }).rows, 0)
+
+    -- A series that only rises ends above a rising 250-day average.
+    local up = {}
+    for i = 1, 400 do up[i] = { date = util_date_add_days('2024-01-01', i),
+                                close = 1000 + i, high = 1000 + i, low = 1000 + i } end
+    local bull = review_regime(up)
+    eq('rising above a rising long average is 多头', bull.state, 'bull')
+    check('and the reason says why', #bull.reasons > 0 and bull.reasons[1]:find('MA250', 1, true))
+    near('with no drawdown at a new high', bull.drawdown, 0, 1e-9)
+
+    local down = {}
+    for i = 1, 400 do down[i] = { date = up[i].date, close = 2000 - i, high = 2000 - i, low = 2000 - i } end
+    eq('falling below a falling one is 空头', review_regime(down).state, 'bear')
+
+    -- Up for a year, then down for a year: the average is still rising while
+    -- the price is below it, which is exactly the third state.
+    local mixed = {}
+    for i = 1, 250 do mixed[#mixed + 1] = { date = up[i].date, close = 1000 + i * 2,
+                                            high = 1000 + i * 2, low = 1000 + i * 2 } end
+    for i = 1, 150 do mixed[#mixed + 1] = { date = up[250 + i].date, close = 1500 - i * 2,
+                                            high = 1500 - i * 2, low = 1500 - i * 2 } end
+    eq('anything else is 震荡', review_regime(mixed).state, 'range')
+    eq('and too little history is unknown', review_regime({ { close = 1 } }).state, 'unknown')
+    eq('an unknown regime still gets a stance', review_stance('unknown').position, '—')
+    check('every state maps to one', review_stance('bull').position ~= nil
+        and review_stance('bear').position ~= nil and review_stance('range').position ~= nil)
+
+    __net_set_transport(fixture_transport)
+    local r = api_call('review.daily', { top = 3 })
+    check('the review builds', r.ok, r.error and r.error.message)
+    if r.ok then
+        eq('the board table came from the fixture', r.data.structure.sector_count, 12)
+        eq('breadth counts boards, not companies', r.data.structure.breadth.total, 12)
+        eq('leaders are capped at the number asked for', #r.data.structure.leaders, 3)
+        eq('and laggards too', #r.data.structure.laggards, 3)
+        eq('the weakest board is last', r.data.structure.laggards[1].name,
+            sect.rows[#sect.rows].name)
+        eq('no index history in the fixtures, so no regime', r.data.market.regime.state, 'unknown')
+        eq('the watchlist part lists what is watched', r.data.watchlist.count,
+            #api_call('watchlist.list').data)
+    end
+    local md = report_review_markdown(r.data)
+    check('the review renders as Markdown', md:find('## 二、结构', 1, true))
+    __net_set_transport(nil)
+end
+
 local function test_market()
     section('market snapshot')
     eq('60 is the main board', market_board('600519'), 'main')
@@ -1384,6 +1445,7 @@ local function run_all()
     test_quote()
     test_tech()
     test_levels()
+    test_review()
 end
 
 return {

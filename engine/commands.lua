@@ -318,6 +318,42 @@ local function install_insight()
     })
 end
 
+local function install_review()
+    api_define({
+        name = 'review.daily', method = 'GET', path = '/api/v1/review',
+        summary = '当日复盘三段：大盘与 regime、板块结构、自选表现',
+        params = {
+            offline = { type = 'boolean', doc = '只用本地缓存，不联网' },
+            force = { type = 'boolean', doc = '强制刷新指数与板块行情' },
+            top = { type = 'integer', doc = '领涨/领跌板块各取几个，默认 5' },
+        },
+        handler = function(p)
+            if p.top and (p.top < 1 or p.top > 20) then
+                return nil, 'bad_request', 'top 应在 1 到 20 之间'
+            end
+            return review_build({ offline = p.offline, force = p.force, top = p.top })
+        end,
+    })
+
+    api_define({
+        name = 'review.sectors', method = 'GET', path = '/api/v1/review/sectors',
+        summary = '板块涨跌表（东方财富行业板块或概念板块）',
+        params = {
+            kind = { type = 'string', enum = { 'industry', 'concept' }, doc = '默认 industry' },
+            offline = { type = 'boolean', doc = '只用本地缓存，不联网' },
+            force = { type = 'boolean', doc = '强制重新抓取' },
+        },
+        handler = function(p)
+            local doc, ecode, emsg = review_sectors({ kind = p.kind, offline = p.offline, force = p.force })
+            if not doc then
+                if p.offline then return nil, 'not_fetched', '本地没有板块行情缓存' end
+                return nil, ecode or 'upstream', emsg or '板块行情获取失败'
+            end
+            return doc
+        end,
+    })
+end
+
 local function install_quote()
     api_define({
         name = 'quote.get', method = 'GET', path = '/api/v1/stocks/:code/quotes',
@@ -423,6 +459,7 @@ function g_exports.commands_install()
     install_system()
     install_market()
     install_quote()
+    install_review()
     install_watchlist()
     install_stock()
     install_alerts()

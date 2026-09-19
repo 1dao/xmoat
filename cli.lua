@@ -46,6 +46,7 @@ local USAGE = [[
   alerts [代码]             最近的提醒
   notify-test               向已配置的推送渠道发送测试消息
   market-refresh            抓取全市场快照（约 15 次请求）
+  review [offline]          当日复盘：大盘与 regime、板块结构、自选表现
   screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
   insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
   ask <代码> <问题>         就这只股票提问（会产生费用）
@@ -86,6 +87,11 @@ local function run()
             if not a then return 1 end
         end
         out(report_markdown(a))
+        return 0
+    elseif cmd == 'review' then
+        local r = call('review.daily', { offline = args[2] == 'offline' })
+        if not r then return 1 end
+        out(report_review_markdown(r))
         return 0
     elseif cmd == 'refresh' then
         if not args[2] then err(USAGE); return 2 end

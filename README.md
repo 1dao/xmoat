@@ -287,6 +287,7 @@ xmoat/
     wxcrypt.lua          企业微信回调的签名与解密
     schedule.lua         定时检查
     market.lua           全市场快照与筛选
+    review.lua           当日复盘三段：大盘与 regime、板块结构、自选
     llm.lua              一次模型调用：Claude 原生接口或 OpenAI 兼容接口
     insight.lua          事实进、经过核对的解读出；问答
     api.lua  commands.lua  engine.lua 命令注册表、全部命令、启动与停止

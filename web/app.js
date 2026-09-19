@@ -148,6 +148,7 @@
     const page = m ? 'stock'
       : location.hash === '#/alerts' ? 'alerts'
       : location.hash === '#/screen' ? 'screen'
+      : location.hash === '#/review' ? 'review'
       : 'watchlist';
     for (const link of document.querySelectorAll('[data-nav]')) {
       if (link.dataset.nav === page) link.setAttribute('aria-current', 'page');
@@ -156,6 +157,7 @@
     if (m) return renderStock(m[1], token);
     if (page === 'alerts') return renderAlerts(token);
     if (page === 'screen') return renderScreen(token);
+    if (page === 'review') return renderReview(token);
     return renderWatchlist(token);
   }
 
@@ -1008,6 +1010,118 @@
       h('span', { class: 'when' }, fmtTime(e.created_at), ' ',
         pushed ? h('span', { class: 'tag' + (e.pushed === 'failed' ? ' is-bad' : ''), text: pushed }) : null),
       e.detail ? h('div', { class: 'detail', text: e.detail }) : null);
+  }
+
+  // ── review ─────────────────────────────────────────────────────────────────
+
+  const REGIME = {
+    bull: '多头（指数在上升的长期均线之上）',
+    bear: '空头（指数在下降的长期均线之下）',
+    range: '震荡（指数与长期均线方向不一致）',
+    unknown: '未知',
+  };
+
+  function reviewMarketCard(m) {
+    const card = h('section', { class: 'card' });
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '一、大盘' }),
+      h('span', { class: 'muted', text: REGIME[(m.regime || {}).state] || '' })));
+    card.append(h('div', { class: 'table-wrap mb' }, h('table', {},
+      h('thead', {}, h('tr', {},
+        h('th', { text: '指数' }), h('th', { class: 'r', text: '收盘' }),
+        h('th', { class: 'r', text: '涨跌' }), h('th', { class: 'r', text: '近 250 日分位' }),
+        h('th', { class: 'r', text: '距高点' }), h('th', { class: 'r', text: '量能' }))),
+      h('tbody', {}, (m.indexes || []).map(ix => h('tr', {},
+        h('td', { text: ix.name || ix.code }),
+        h('td', { class: 'r num', text: fmtNum(ix.close) }),
+        h('td', { class: 'r num', text: fmtPct(ix.change_pct, 2) }),
+        h('td', { class: 'r num', text: fmtPct(ix.position_250, 0) }),
+        h('td', { class: 'r num', text: fmtPct(ix.from_high, 1) }),
+        h('td', { class: 'r num', text: fmtNum(ix.volume_ratio, 2) })))))));
+    const rg = m.regime || {};
+    card.append(h('ul', { class: 'plain' },
+      (rg.reasons || []).map(x => h('li', { class: 'muted small', text: x }))));
+    const st = m.stance || {};
+    if (st.position) {
+      card.append(h('p', {}, h('strong', { text: '机械仓位区间 ' + st.position + '　' }),
+        h('span', { text: st.text || '' })));
+      card.append(h('p', { class: 'muted small', text: st.note || '' }));
+    }
+    return card;
+  }
+
+  function sectorTable(title, rows, withLeader) {
+    return h('div', { class: 'table-wrap mb' }, h('table', {},
+      h('thead', {}, h('tr', {},
+        h('th', { text: title }), h('th', { class: 'r', text: '涨跌' }),
+        h('th', { class: 'r', text: '涨/跌家数' }),
+        withLeader ? h('th', { text: '领涨股' }) : null)),
+      h('tbody', {}, rows.map(x => h('tr', {},
+        h('td', { text: x.name }),
+        h('td', { class: 'r num', text: fmtPct(x.change_pct, 2) }),
+        h('td', { class: 'r num', text: (x.up || 0) + '/' + (x.down || 0) }),
+        withLeader ? h('td', { text: (x.leader || '—') + ' ' + fmtPct(x.leader_change, 1) }) : null)))));
+  }
+
+  function reviewStructureCard(s) {
+    const card = h('section', { class: 'card' });
+    const when = s.fetched_at ? '板块数据 ' + s.fetched_at.slice(0, 16).replace('T', ' ') + ' UTC' : '';
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '二、结构' }),
+      h('span', { class: 'muted', text: when })));
+    if (s.note) { card.append(h('p', { class: 'muted', text: s.note })); return card; }
+    const b = s.breadth || {};
+    card.append(h('p', { text: '板块涨跌：' + (b.up || 0) + ' 涨 / ' + (b.down || 0) + ' 跌 / ' +
+      (b.flat || 0) + ' 平，共 ' + (s.sector_count || 0) + ' 个行业板块，上涨占 ' + fmtPct(b.ratio, 0) }));
+    card.append(sectorTable('领涨板块', s.leaders || [], true),
+      sectorTable('领跌板块', s.laggards || [], false));
+    card.append(h('p', { class: 'muted small', text: '按板块口径统计：东方财富的细分行业互相重叠，一只股票会出现在多个板块里，所以这里数的是板块，不是公司。' }));
+    return card;
+  }
+
+  function reviewWatchCard(w) {
+    const card = h('section', { class: 'card' });
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '三、自选' }),
+      h('span', { class: 'muted', text: (w.count || 0) + ' 只' })));
+    if (!w.count) { card.append(h('p', { class: 'muted', text: '自选为空。' })); return card; }
+    card.append(h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {},
+        h('th', { text: '代码' }), h('th', { text: '名称' }),
+        h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '涨跌' }),
+        h('th', { class: 'r', text: '估值分位' }), h('th', { class: 'r', text: '警示' }),
+        h('th', { text: '提示' }))),
+      h('tbody', {}, (w.rows || []).map(x => h('tr', {},
+        h('td', {}, h('a', { href: '#/stock/' + enc(x.code), text: x.code })),
+        h('td', { text: x.name || '—' }),
+        h('td', { class: 'r num', text: fmtNum(x.close) }),
+        h('td', { class: 'r num', text: fmtPct(x.change_pct, 2) }),
+        h('td', { class: 'r num', text: fmtPct(x.percentile, 0) }),
+        h('td', { class: 'r num', text: String(x.warnings || 0) }),
+        h('td', {}, (x.flags || []).length
+          ? h('span', { class: 'channel-list' }, x.flags.map(f => h('span', { class: 'tag', text: f })))
+          : h('span', { class: 'muted', text: '—' }))))))));
+    return card;
+  }
+
+  async function renderReview(token) {
+    document.title = '复盘 · xmoat';
+    setView(loading('复盘生成中…'));
+    let r;
+    try {
+      r = await api('GET', '/api/v1/review');
+    } catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
+    if (stale(token)) return;
+
+    const refresh = h('button', { class: 'btn', text: '重新抓取行情' });
+    refresh.addEventListener('click', () => busy(refresh, '抓取中…', async () => {
+      await api('GET', '/api/v1/review?force=true');
+      route();
+    }));
+    const head = h('div', { class: 'page-head' },
+      h('h1', { text: '复盘 ' + (r.as_of || '') }),
+      h('span', { class: 'spacer' }), refresh);
+
+    setView(head, reviewMarketCard(r.market || {}), reviewStructureCard(r.structure || {}),
+      reviewWatchCard(r.watchlist || {}));
+    view.focus({ preventScroll: true });
   }
 
   async function renderAlerts(token) {

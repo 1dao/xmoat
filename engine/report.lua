@@ -259,6 +259,82 @@ end
 -- company names and dividend plans routinely contain.
 -- ---------------------------------------------------------------------------
 
+local REGIME = { bull = '多头（指数在上升的长期均线之上）', bear = '空头（指数在下降的长期均线之下）',
+                 range = '震荡（指数与长期均线方向不一致）', unknown = '未知' }
+
+-- The daily review as Markdown: the same three parts the object has.
+function g_exports.report_review_markdown(r)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+
+    f('# 复盘 %s', r.as_of or util_today())
+    line()
+
+    local m = r.market or {}
+    line('## 一、大盘')
+    line()
+    line('| 指数 | 收盘 | 涨跌 | 近 250 日分位 | 距高点 | 量能 |')
+    line('|---|---|---|---|---|---|')
+    for _, ix in ipairs(m.indexes or {}) do
+        f('| %s | %s | %s | %s | %s | %s |', ix.name or ix.code, num(ix.close),
+            report_pct(ix.change_pct, 2), report_pct(ix.position_250, 0),
+            report_pct(ix.from_high, 1), num(ix.volume_ratio, 2))
+    end
+    line()
+    local rg = m.regime or {}
+    f('- 状态（%s）：%s', m.regime_index or '—', REGIME[rg.state] or '—')
+    for _, why in ipairs(rg.reasons or {}) do f('  - %s', why) end
+    local st = m.stance or {}
+    if st.position then
+        f('- 机械仓位区间：%s。%s', st.position, st.text or '')
+        f('  > %s', st.note or '')
+    end
+    line()
+
+    local sct = r.structure or {}
+    line('## 二、结构')
+    line()
+    if sct.note then
+        f('- %s', sct.note)
+    else
+        local b = sct.breadth or {}
+        f('- 板块涨跌：%d 涨 / %d 跌 / %d 平，共 %d 个行业板块，上涨占 %s',
+            b.up or 0, b.down or 0, b.flat or 0, sct.sector_count or 0, report_pct(b.ratio, 0))
+        line()
+        line('| 领涨板块 | 涨跌 | 涨/跌家数 | 领涨股 |')
+        line('|---|---|---|---|')
+        for _, x in ipairs(sct.leaders or {}) do
+            f('| %s | %s | %d/%d | %s %s |', x.name, report_pct(x.change_pct, 2),
+                x.up or 0, x.down or 0, x.leader or '—', report_pct(x.leader_change, 1))
+        end
+        line()
+        line('| 领跌板块 | 涨跌 | 涨/跌家数 |')
+        line('|---|---|---|')
+        for _, x in ipairs(sct.laggards or {}) do
+            f('| %s | %s | %d/%d |', x.name, report_pct(x.change_pct, 2), x.up or 0, x.down or 0)
+        end
+    end
+    line()
+
+    local w = r.watchlist or {}
+    line('## 三、自选')
+    line()
+    if (w.count or 0) == 0 then
+        line('- 自选为空。')
+    else
+        line('| 代码 | 名称 | 收盘 | 涨跌 | 估值分位 | 警示 | 提示 |')
+        line('|---|---|---|---|---|---|---|')
+        for _, x in ipairs(w.rows or {}) do
+            f('| %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—', num(x.close),
+                report_pct(x.change_pct, 2), report_pct(x.percentile, 0),
+                x.warnings or 0, #(x.flags or {}) > 0 and table.concat(x.flags, '、') or '—')
+        end
+    end
+    line()
+    return table.concat(L, '\n')
+end
+
 local function group_events(events, max)
     local groups, by_code, shown = {}, {}, 0
     for _, e in ipairs(events) do

@@ -32,6 +32,7 @@ return {
     'engine/watch.lua',      -- watch_*     the watchlist
     'engine/stock.lua',      -- stock_*     refresh and read one stock
     'engine/market.lua',     -- market_*    the whole market, and screening it
+    'engine/review.lua',     -- review_*    the market's day: 大盘、结构、自选
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry
