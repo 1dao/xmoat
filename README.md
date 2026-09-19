@@ -59,7 +59,7 @@
 - 新财报发布、新分红方案（预案、通过、实施）
 - 估值穿过你自己设定的区间，或进入历史低位 / 高位
 - 检查清单出现新的提示，或提示解除
-- 工作日收盘后自动检查，推送到企业微信、飞书、钉钉、Telegram 或任意 Webhook
+- 工作日收盘后自动检查，推送到企业微信（群机器人或应用）、飞书、钉钉、Telegram 或任意 Webhook
 
 **主营靠什么赚钱？**
 - 按产品、地区、行业拆分的收入、占比和毛利率
@@ -142,7 +142,8 @@ bin/xnet.exe cli.lua screen roe_min=15 pe_max=20 cap_min=100 ocf_to_eps_min=0.8
 **提醒与推送**
 
 1. 把 [xmoat.local.cfg.example](xmoat.local.cfg.example) 复制成 `xmoat.local.cfg`，填上要用的渠道：
-   企业微信、飞书（可加签）、钉钉（可加签）、Telegram（可单独走代理）或通用 Webhook。
+   企业微信群机器人、企业微信应用（发给成员本人）、飞书（可加签）、钉钉（可加签）、
+   Telegram（可单独走代理）或通用 Webhook。
 2. 在 Web 界面的「提醒」页点「发送测试消息」，或者：
 
 ```bash
@@ -273,7 +274,7 @@ xmoat/
     report.lua           分析对象 → Markdown；提醒 → 推送消息
     events.lua           刷新前后对比：财报、分红、区间、估值分位、检查清单
     alerts.lua           提醒记录、推送、立即检查
-    notify.lua           推送渠道：企业微信、飞书、钉钉、Telegram、Webhook
+    notify.lua           推送渠道：企业微信（群机器人 / 应用）、飞书、钉钉、Telegram、Webhook
     schedule.lua         定时检查
     market.lua           全市场快照与筛选
     llm.lua              一次模型调用：Claude 原生接口或 OpenAI 兼容接口
@@ -304,7 +305,7 @@ xmoat/
 
 - [x] **Phase 0 · 设计**：指标口径文档、数据字段映射、项目骨架
 - [x] **Phase 1 · A 股核心**：自选股、财报与估值抓取（增量）、质量与估值指标、分红、检查清单、银行模板、JSON 存储、命令行 Markdown 报告
-- [x] **Phase 2 · 提醒**：财报与分红检测、估值区间与历史高低位提醒、检查清单变化、推送（企业微信、飞书、钉钉、Telegram、Webhook）、定时检查
+- [x] **Phase 2 · 提醒**：财报与分红检测、估值区间与历史高低位提醒、检查清单变化、推送（企业微信群机器人与应用、飞书、钉钉、Telegram、Webhook）、定时检查
 - [x] **Phase 3 · Web 界面**（提前完成基础部分）：自选管理、个股基本面页、估值走势图、合理区间设置
 - [x] **Phase 4 · 大模型**：主营构成、年报经营评述归纳、护城河判断、基于事实的问答、回答中数字的自动核对
 - [ ] **Phase 5 · 扩展**

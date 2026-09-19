@@ -236,7 +236,10 @@ type Alert = {
   pushed_at?: string, push_attempts?: number,
 }
 
-type PushResult = { kind: string, name: string, ok: boolean, error?: string }
+type PushResult = {
+  kind: 'wecom' | 'wecom_app' | 'feishu' | 'dingtalk' | 'telegram' | 'webhook',
+  name: string, ok: boolean, error?: string,
+}
 
 type RunResult = {
   refreshed: { code: string, ok: boolean, error?: { code: string, message: string } }[],

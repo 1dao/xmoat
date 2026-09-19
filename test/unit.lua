@@ -541,6 +541,14 @@ local function test_notify()
     eq('Telegram URL carries the token', tg.url, 'https://api.telegram.org/bot12:AB/sendMessage')
     eq('Telegram sends plain text', tg.body.parse_mode, nil)
     eq('WeCom sends Markdown', notify_build('wecom', { url = 'u' }, msg, 1).body.markdown.content, 'md')
+    local app = notify_build('wecom_app', { api = 'https://qyapi.test', access_token = 'tk/1',
+                                            corp_id = 'c', secret = 's', agent_id = 1000002 }, msg, 1)
+    eq('the WeCom app carries its token in the query', app.url,
+        'https://qyapi.test/cgi-bin/message/send?access_token=tk%2F1')
+    eq('the WeCom app names its application', app.body.agentid, 1000002)
+    eq('the WeCom app defaults to everyone it can see', app.body.touser, '@all')
+    -- Text, not Markdown: Markdown from an app is invisible in the WeChat plugin.
+    eq('the WeCom app sends plain text', app.body.text.content, 'tx')
     eq('the webhook carries a bearer', notify_build('webhook', { url = 'u', bearer = 'k' }, msg, 1).headers.Authorization,
         'Bearer k')
 
@@ -550,6 +558,40 @@ local function test_notify()
     local okt, why = notify_judge('telegram', { status = 400 }, { ok = false, description = 'chat not found' })
     check('Telegram gives its own reason', okt == false and why == 'chat not found', why)
     eq('a webhook 204 is delivered', (notify_judge('webhook', { status = 204 }, nil)), true)
+
+    -- The app channel's two-request dance: a token, then the message — and a
+    -- fresh token plus a resend when the one we held is no longer accepted.
+    __notify_clear_tokens()
+    local calls = {}
+    __net_set_transport(function(url)
+        calls[#calls + 1] = url
+        if url:find('gettoken', 1, true) then
+            return { status = 200, body = string.format(
+                '{"errcode":0,"errmsg":"ok","access_token":"T%d","expires_in":7200}', #calls) }
+        elseif url:find('access_token=T1', 1, true) then
+            return { status = 200, body = '{"errcode":42001,"errmsg":"access_token expired"}' }
+        end
+        return { status = 200, body = '{"errcode":0,"errmsg":"ok","invaliduser":""}' }
+    end)
+    __notify_set_channels({ { kind = 'wecom_app', name = '企业微信应用', conf = {
+        api = 'https://qyapi.test', corp_id = 'c', secret = 's', agent_id = 1000002, touser = '@all' } } })
+    local res = notify_send(msg)
+    eq('a refused token is replaced and the message resent', res[1].ok, true)
+    eq('which took token, send, token, send', #calls, 4)
+    calls = {}
+    eq('the next message reuses the token', (notify_send(msg))[1].ok, true)
+    eq('so it is one request, not two', #calls, 1)
+
+    __notify_clear_tokens()
+    __net_set_transport(function()
+        return { status = 200, body = '{"errcode":40001,"errmsg":"invalid credential"}' }
+    end)
+    local bad = notify_send(msg)
+    check('a secret WeCom refuses is reported as such', bad[1].ok == false and
+        tostring(bad[1].error):find('40001', 1, true), bad[1].error)
+    __net_set_transport(nil)
+    __notify_set_channels(nil)
+    __notify_clear_tokens()
 end
 
 local function test_alerts(evs)

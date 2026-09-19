@@ -959,7 +959,7 @@
     const row = (k, v) => kv.append(h('dt', { text: k }), h('dd', {}, v));
     row('推送渠道', channels.length
       ? h('span', { class: 'channel-list' }, channels.map(c => h('span', { class: 'tag', text: c.name })))
-      : h('span', { class: 'muted', text: '未配置。在 xmoat.local.cfg 里填写企业微信、飞书、钉钉、Telegram 或 Webhook，格式见 xmoat.local.cfg.example。' }));
+      : h('span', { class: 'muted', text: '未配置。在 xmoat.local.cfg 里填写企业微信（群机器人或应用）、飞书、钉钉、Telegram 或 Webhook，格式见 xmoat.local.cfg.example。' }));
     if (schedule.enabled) {
       const offset = `UTC${schedule.utc_offset >= 0 ? '+' : ''}${schedule.utc_offset}`;
       row('定时检查', h('span', { text: `星期 ${schedule.weekdays}（1 为周一）的 ${(schedule.times || []).join('、')}（${offset}）` }));
