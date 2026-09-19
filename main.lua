@@ -26,6 +26,7 @@ end
 for _, path in ipairs(boot.run_script('engine/manifest.lua')) do boot.load_script(path) end
 boot.load_script('host/http.lua')    -- http_*
 boot.load_script('host/web.lua')     -- web_*
+boot.load_script('host/wecom.lua')   -- wecom_*
 
 local function __init()
     assert(xnet.init())
@@ -40,6 +41,7 @@ local function __init()
 
     http_install_api()
     web_install()
+    wecom_install()
 
     -- The daily check belongs to a long-running host like this one. A phone
     -- host would call alerts.run when the OS wakes it instead.

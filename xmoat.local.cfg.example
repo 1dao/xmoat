@@ -18,6 +18,15 @@
 # WECOM_AGENT_ID=1000002
 # WECOM_TO_USER=@all
 
+# 企业微信回调：只为打开后台里「企业可信IP」那一栏。服务器在境外时，应用推送会被
+# 挡回 errcode 60020，要把出口 IP 填进可信 IP；而后台要先配好「API接收消息」的
+# URL 才让填。Token 和 EncodingAESKey 在那个页面点「随机获取」，URL 填
+# http://<公网IP>:8688/wecom/callback —— 未认证企业可以直接用 IP，认证企业要备案
+# 域名。保存时企业微信会当场来验一次，所以服务要开着，LISTEN_HOST=0.0.0.0、端口
+# 放行、API_TOKEN 已设。填完可信 IP 就可以把这两行注释掉，路由随之消失。
+# WECOM_CALLBACK_TOKEN=...
+# WECOM_CALLBACK_AES_KEY=<43 位 EncodingAESKey>
+
 # 飞书群机器人：自定义机器人；开启"签名校验"时填 FEISHU_SECRET
 # FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/...
 # FEISHU_SECRET=...

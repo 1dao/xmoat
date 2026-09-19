@@ -77,6 +77,12 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   with `__notify_set_channels`; config cannot be changed after startup.
 - Signing vectors for DingTalk and Feishu in `test/unit.lua` were computed
   independently (Python hmac); keep them when touching `notify_build`.
+- `engine/wxcrypt.lua` + `host/wecom.lua` are the WeCom callback, and exist
+  only so the console will let a trusted IP be declared (the app channel is
+  refused with `errcode 60020` from outside mainland China). It is the one
+  route NOT behind `API_TOKEN` — WeCom sends no header, so the signature and
+  the AES key are the credential — and it drops every event it receives. The
+  vector in `test/unit.lua` is Tencent's own WXBizMsgCrypt sample.
 
 ## Screening
 

@@ -44,6 +44,7 @@
 - `null` 只在标注为 nullable 的参数上有效，表示"清除"。
 - 设置了 `API_TOKEN` 时，每个 `/api` 请求都要带 `Authorization: Bearer <token>`。
 - 设置了 `CORS_ORIGIN` 时，响应带相应的 CORS 头，`OPTIONS` 预检返回 204。
+- `WECOM_CALLBACK_PATH`（默认 `/wecom/callback`）不属于 `/api`，也不走 `API_TOKEN`：企业微信不带 `Authorization`，它的凭证是签名与那把 AES 密钥。配置了 Token 和 EncodingAESKey 才有这条路由；它只回验证串，事件一律读完就丢。
 
 ## 命令
 

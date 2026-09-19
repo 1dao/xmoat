@@ -158,6 +158,12 @@ bin/xnet.exe cli.lua check
 
 推送的内容和格式见 [docs/METRICS.md](docs/METRICS.md#提醒规则)。
 
+服务器在境外时，企业微信应用推送会被挡回 `errcode 60020: not allow to access from your ip`：
+出口 IP 不在应用的「企业可信IP」里。而后台要求先配好「API接收消息」的回调地址才让填那一栏，
+所以 xmoat 自带这个回调：在 `xmoat.local.cfg` 里填上后台给的 `WECOM_CALLBACK_TOKEN` 和
+`WECOM_CALLBACK_AES_KEY`，`http://<公网IP>:8688/wecom/callback` 就能通过它的验证
+（未认证企业可以直接用 IP，认证企业要备案域名）。回调只做验证，收到的事件读完就丢。
+
 **大模型解读（可选，会产生费用）**
 
 在 `xmoat.local.cfg` 里配置模型，Claude 或任何 OpenAI 兼容接口都行：
@@ -275,6 +281,7 @@ xmoat/
     events.lua           刷新前后对比：财报、分红、区间、估值分位、检查清单
     alerts.lua           提醒记录、推送、立即检查
     notify.lua           推送渠道：企业微信（群机器人 / 应用）、飞书、钉钉、Telegram、Webhook
+    wxcrypt.lua          企业微信回调的签名与解密
     schedule.lua         定时检查
     market.lua           全市场快照与筛选
     llm.lua              一次模型调用：Claude 原生接口或 OpenAI 兼容接口
@@ -282,6 +289,7 @@ xmoat/
     api.lua  commands.lua  engine.lua 命令注册表、全部命令、启动与停止
   host/
     http.lua  web.lua    HTTP 服务与路由；静态文件
+    wecom.lua            企业微信回调地址
   web/                   浏览器客户端，无构建步骤
   scripts/core/share/    从 xnet2lua 复制的模块子集
   test/unit.lua          离线测试

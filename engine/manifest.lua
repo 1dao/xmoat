@@ -23,6 +23,7 @@ return {
     'engine/events.lua',     -- events_*    what changed between two refreshes
     'engine/store.lua',      -- store_*     JSON files under DATA_DIR
     'engine/notify.lua',     -- notify_*    push channels
+    'engine/wxcrypt.lua',    -- wxcrypt_*   WeCom's callback envelope
     'engine/llm.lua',        -- llm_*       one chat call: Claude or OpenAI-compatible
     'engine/alerts.lua',     -- alerts_*    the alert log, pushing, the check
     'engine/watch.lua',      -- watch_*     the watchlist

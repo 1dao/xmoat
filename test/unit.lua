@@ -22,6 +22,7 @@ end
 for _, path in ipairs(boot.run_script('engine/manifest.lua')) do boot.load_script(path) end
 boot.load_script('host/http.lua')
 boot.load_script('host/web.lua')
+boot.load_script('host/wecom.lua')
 
 xthread.set_log_level(6)   -- WARN and above; the checks are the output
 
@@ -594,6 +595,61 @@ local function test_notify()
     __notify_clear_tokens()
 end
 
+-- The callback that the console demands before it will let an address be
+-- declared trusted. The vector is Tencent's own (the WXBizMsgCrypt sample):
+-- their key, their signature, their ciphertext, so a mistake here is ours.
+local function test_wecom_callback()
+    section('WeCom callback')
+    local xutils = require('xutils')
+    local conf = {
+        token = 'QDG6eK',
+        key = xutils.base64_decode('jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C='),
+        receiveid = 'wx5823bf96d3bd56c7',
+    }
+    local TS, NONCE = '1409659589', '263014780'
+    local ECHO = 'P9nAzCzyDtyTWESHep1vC5X9xho/qYX3Zpb4yKa9SKld1DsH3Iyt3tP3' ..
+                 'zNdtp+4RPcs8TgAE7OaBO+FZXvnaqQ=='
+    local SIG = '5c45ff5e21c57e6ad56bac8758b79b1d9ac89fd3'
+    local PLAIN = '1616140317555161061'
+
+    eq('the 43-character key decodes to 32 bytes', #conf.key, 32)
+    eq('the signature matches the vector', wxcrypt_signature(conf.token, TS, NONCE, ECHO), SIG)
+    eq('the echostr decrypts to its plaintext', (wxcrypt_open(conf, SIG, TS, NONCE, ECHO)), PLAIN)
+
+    eq('a tampered signature is refused', (wxcrypt_open(conf, SIG:gsub('^5c', '5d'), TS, NONCE, ECHO)), nil)
+    eq('another nonce is refused', (wxcrypt_open(conf, SIG, TS, '9', ECHO)), nil)
+    eq('a missing parameter is refused', (wxcrypt_open(conf, SIG, TS, NONCE, nil)), nil)
+    -- Decrypts, but was addressed to another company: the receiveid is the one
+    -- part of the plaintext we are entitled to check, so it is checked.
+    local other = { token = conf.token, key = conf.key, receiveid = 'wxOTHERCOMPANY' }
+    local msg, why = wxcrypt_open(other, SIG, TS, NONCE, ECHO)
+    check('a receiveid from another company is refused', msg == nil and why == 'receiveid is another company', why)
+
+    eq('without keys there is no route', wecom_install(), false)
+    check('the route installs with a conf', wecom_install(conf))
+
+    local path = cfg_get('WECOM_CALLBACK_PATH', '/wecom/callback')
+    local function req(method, query, body)
+        return http_dispatch({ method = method, path = path, headers = {},
+                               query = query, body = body or '' }, {})
+    end
+    local ok = req('GET', { msg_signature = SIG, timestamp = TS, nonce = NONCE, echostr = ECHO })
+    eq('the URL check answers 200', ok.status, 200)
+    -- Exactly the plaintext: WeCom compares the whole body, newline included.
+    eq('the URL check echoes the plaintext alone', ok.body, PLAIN)
+    eq('a forged URL check is 403',
+        req('GET', { msg_signature = SIG, timestamp = TS, nonce = '9', echostr = ECHO }).status, 403)
+
+    local xml = '<xml><ToUserName><![CDATA[wx5823bf96d3bd56c7]]></ToUserName>' ..
+                '<Encrypt><![CDATA[' .. ECHO .. ']]></Encrypt></xml>'
+    local ev = req('POST', { msg_signature = SIG, timestamp = TS, nonce = NONCE }, xml)
+    eq('an event is accepted', ev.status, 200)
+    -- Nothing is done with it, and an empty body is WeCom's "no reply".
+    eq('an event is answered with nothing', ev.body, '')
+    eq('a body without Encrypt is 403',
+        req('POST', { msg_signature = SIG, timestamp = TS, nonce = NONCE }, '<xml/>').status, 403)
+end
+
 local function test_alerts(evs)
     section('alert log and flush')
     for _, e in ipairs(evs) do e.pushed, e.seq, e.created_at = nil, nil, nil end
@@ -1115,6 +1171,7 @@ local function run_all()
     test_http()
     local evs = test_events()
     test_notify()
+    test_wecom_callback()
     test_alerts(evs)
     test_schedule()
     test_refresh_events()
