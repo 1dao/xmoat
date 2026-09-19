@@ -27,6 +27,21 @@ local T = {
     npl_rise_max = 0.1,           -- year-on-year rise, pt
     provision_coverage_min = 150, -- percent (the regulatory floor is 120-150)
     core_t1_min = 8.5,            -- percent (7.5 minimum plus buffers)
+    -- insurers. Solvency is the regulator's own ratio: 100% is the floor,
+    -- 150% the level at which supervision starts paying attention.
+    solvency_min = 150,           -- comprehensive solvency ratio, percent
+    surrender_rate_max = 3,       -- life surrender rate, percent of the year
+    nbv_drop_max = 10,            -- new business value, year-on-year fall, percent
+    net_investment_yield_min = 3.5,  -- percent; long-run pricing assumes 4-5%
+    -- brokers. Every line below is a ratio the CSRC's risk-control rules
+    -- define, with its own floor and its own early-warning level; the warning
+    -- level is what is used here, so a check fires before the rule is broken.
+    risk_coverage_min = 120,      -- percent (floor 100)
+    capital_leverage_min = 9.6,   -- percent (floor 8)
+    liquidity_coverage_min = 120, -- percent (floor 100)
+    net_funding_ratio_min = 120,  -- percent (floor 100)
+    net_capital_ratio_min = 24,   -- net capital / net assets, percent (floor 20)
+    proprietary_equity_max = 80,  -- equity holdings / net capital, percent (cap 100)
 }
 g_exports.checks_thresholds = T
 
@@ -251,6 +266,44 @@ local function check_npl_trend(annual)
 end
 
 -- ---------------------------------------------------------------------------
+-- Insurers and brokers
+--
+-- Both templates lean on ratios their regulator defines and the company
+-- reports, so a check is a comparison against a published line rather than a
+-- rule of thumb. Point-in-time ratios (solvency, risk coverage) are read from
+-- the latest report of any kind; ratios that are flows over a period (the
+-- surrender rate, investment yield) are read from the latest ANNUAL report,
+-- because an interim figure covers half a year and would read as half as good.
+-- ---------------------------------------------------------------------------
+
+local function latest_fy(annual)
+    return annual[#annual]
+end
+
+-- A one-sided comparison against `bound` on a named field of one report.
+local function check_ratio(report, key, title, field, label, bound, is_max, digits)
+    local v = report and util_num(report[field])
+    if not v then return na(key, title, '缺少' .. label) end
+    local f = '%.' .. (digits or 1) .. 'f%%'
+    local bad = is_max and v > bound or (not is_max and v < bound)
+    return check(key, title, bad and 'warn' or 'pass',
+        string.format('%s %s %s（%s %s）', report.period, label, string.format(f, v),
+            is_max and '上限' or '下限', string.format(f, bound)),
+        { value = v, threshold = bound, period = report.period })
+end
+
+local function check_nbv_trend(annual)
+    local key, title = 'nbv_trend', '新业务价值没有明显下滑'
+    local fy, prev = annual[#annual], annual[#annual - 1]
+    if not fy or not prev then return na(key, title, '需要连续两个年报') end
+    local now, before = util_num(fy.nbv), util_num(prev.nbv)
+    if not now or not before or before <= 0 then return na(key, title, '缺少新业务价值') end
+    local change = (now / before - 1) * 100
+    return check(key, title, change < -T.nbv_drop_max and 'warn' or 'pass',
+        string.format('新业务价值 %s → %s（%s → %s），同比 %s，阈值 −%.0f%%',
+            yi(before), yi(now), prev.period, fy.period, pct(change), T.nbv_drop_max),
+        { value = change, threshold = -T.nbv_drop_max, period = fy.period })
+end
 
 -- template: see engine/quality.lua. balance: newest first, may be empty.
 -- Returns a list of checks.
@@ -269,6 +322,36 @@ function g_exports.checks_build(reports, balance, template)
             '核心一级资本充足率', T.core_t1_min, false))
         return util_json_array(out)
     end
+
+    if template == 'insurance' then
+        local latest, fy = fin_latest(reports), latest_fy(annual)
+        add(check_ratio(latest, 'solvency', '偿付能力充足', 'solvency_ratio',
+            '综合偿付能力充足率', T.solvency_min, false))
+        add(check_nbv_trend(annual))
+        add(check_ratio(fy, 'surrender_rate', '退保率不高', 'surrender_rate',
+            '退保率', T.surrender_rate_max, true, 2))
+        add(check_ratio(fy, 'net_investment_yield', '净投资收益率不低', 'net_investment_yield',
+            '净投资收益率', T.net_investment_yield_min, false, 2))
+        return util_json_array(out)
+    end
+
+    if template == 'broker' then
+        local latest = fin_latest(reports)
+        add(check_ratio(latest, 'risk_coverage', '风险覆盖率充足', 'risk_coverage',
+            '风险覆盖率', T.risk_coverage_min, false))
+        add(check_ratio(latest, 'capital_leverage', '资本杠杆率充足', 'capital_leverage',
+            '资本杠杆率', T.capital_leverage_min, false))
+        add(check_ratio(latest, 'liquidity_coverage', '流动性覆盖率充足', 'liquidity_coverage',
+            '流动性覆盖率', T.liquidity_coverage_min, false))
+        add(check_ratio(latest, 'net_funding_ratio', '净稳定资金率充足', 'net_funding_ratio',
+            '净稳定资金率', T.net_funding_ratio_min, false))
+        add(check_ratio(latest, 'net_capital_ratio', '净资本占净资产比例充足', 'net_capital_ratio',
+            '净资本 / 净资产', T.net_capital_ratio_min, false))
+        add(check_ratio(latest, 'proprietary_equity', '自营权益敞口不高', 'proprietary_equity_ratio',
+            '自营权益类证券 / 净资本', T.proprietary_equity_max, true))
+        return util_json_array(out)
+    end
+
     if template ~= 'general' then
         return util_json_array(out)
     end

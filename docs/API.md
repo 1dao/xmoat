@@ -141,6 +141,10 @@ type Valuation = {
     all?: Percentile, all_note?: string,    // 全部历史；算不出时 note 说明原因
     y5?: Percentile,  y5_note?: string,     // 近 5 年
   }[],
+  extras: {                                 // 没有每日历史、因而没有分位的指标
+    key: string, label: string, value: number,
+    basis: string, note?: string,
+  }[],                                      // 目前只有保险公司的 P/EV
   dividend: {
     dps_ttm: number, yield_ttm?: number,    // 按除息日统计的近 12 个月
     from: string, to: string,

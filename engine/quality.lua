@@ -43,17 +43,40 @@ local SERIES = {
         { 'np_parent_yoy', '归母净利润同比', '%' },
     },
 }
--- Insurers and brokers get the lines every company has until their own
--- metrics exist; engine/analysis.lua says so in the output.
 SERIES.insurance = {
+    { 'roe', 'ROE（加权）', '%' },
+    { 'solvency_ratio', '综合偿付能力充足率', '%' },
+    { 'embedded_value', '内含价值', 'CNY' },
+    { 'nbv', '新业务价值', 'CNY' },
+    { 'nbv_rate', '新业务价值率', '%' },
+    { 'net_investment_yield', '净投资收益率', '%', 2 },
+    { 'surrender_rate', '退保率', '%', 2 },
+    { 'earned_premium', '已赚保费', 'CNY' },
+    { 'np_parent', '归母净利润', 'CNY' },
+    { 'np_parent_yoy', '归母净利润同比', '%' },
+}
+SERIES.broker = {
+    { 'roe', 'ROE（加权）', '%' },
+    { 'net_capital', '净资本', 'CNY' },
+    { 'net_capital_ratio', '净资本 / 净资产', '%' },
+    { 'risk_coverage', '风险覆盖率', '%' },
+    { 'capital_leverage', '资本杠杆率', '%' },
+    { 'liquidity_coverage', '流动性覆盖率', '%' },
+    { 'net_funding_ratio', '净稳定资金率', '%' },
+    { 'proprietary_equity_ratio', '自营权益类证券 / 净资本', '%' },
+    { 'revenue', '营业收入', 'CNY' },
+    { 'revenue_yoy', '营收同比', '%' },
+    { 'np_parent', '归母净利润', 'CNY' },
+    { 'np_parent_yoy', '归母净利润同比', '%' },
+}
+-- A company type with no template of its own gets the lines every company has.
+SERIES.other = {
     { 'roe', 'ROE（加权）', '%' },
     { 'revenue', '营业收入', 'CNY' },
     { 'revenue_yoy', '营收同比', '%' },
     { 'np_parent', '归母净利润', 'CNY' },
     { 'np_parent_yoy', '归母净利润同比', '%' },
 }
-SERIES.broker = SERIES.insurance
-SERIES.other = SERIES.insurance
 
 local function column(annual, key)
     local out = {}
@@ -140,6 +163,30 @@ function g_exports.quality_build(reports, template)
                 util_num(latest.provision_coverage), basis))
             add(summary_item('core_t1_latest', '核心一级资本充足率（最新）', '%',
                 util_num(latest.core_t1), basis))
+        end
+    elseif template == 'insurance' then
+        local latest = fin_latest(reports)
+        if latest then
+            local basis = latest.period
+            add(summary_item('solvency_latest', '综合偿付能力充足率（最新）', '%',
+                util_num(latest.solvency_ratio), basis))
+            add(summary_item('embedded_value_latest', '内含价值（最新）', 'CNY',
+                util_num(latest.embedded_value), basis))
+            add(summary_item('nbv_rate_latest', '新业务价值率（最新）', '%', util_num(latest.nbv_rate), basis))
+        end
+        -- New business value is what a life insurer sold this year, and the
+        -- number the market follows; its trend belongs beside ROE.
+        add(cagr_item('nbv_cagr', '新业务价值增速', annual, 'nbv'))
+    elseif template == 'broker' then
+        local latest = fin_latest(reports)
+        if latest then
+            local basis = latest.period
+            add(summary_item('risk_coverage_latest', '风险覆盖率（最新）', '%',
+                util_num(latest.risk_coverage), basis))
+            add(summary_item('capital_leverage_latest', '资本杠杆率（最新）', '%',
+                util_num(latest.capital_leverage), basis))
+            add(summary_item('net_capital_ratio_latest', '净资本 / 净资产（最新）', '%',
+                util_num(latest.net_capital_ratio), basis))
         end
     end
     add(cagr_item('np_cagr', '归母净利润增速', annual, 'np_parent'))

@@ -73,6 +73,9 @@ function g_exports.report_markdown(a)
                 m.all and num(m.all.median) or '—')
         end
         line()
+        for _, x in ipairs(v.extras or {}) do
+            f('- %s：%s（%s）', x.label, num(x.value), x.basis or '')
+        end
         local d = v.dividend
         if d then
             f('- 股息率（近 12 个月）：%s，每股派现 %s 元', report_pct(d.yield_ttm, 2), num(d.dps_ttm, 3))

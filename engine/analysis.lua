@@ -16,8 +16,10 @@
 g_exports.analysis_schema = 1
 
 local TEMPLATE_NOTES = {
-    insurance = '保险公司的专项指标（内含价值、新业务价值、偿付能力）尚未实现，这里只展示通用指标和估值。',
-    broker = '证券公司的专项指标（净资本、风险覆盖率、自营占比）尚未实现，这里只展示通用指标和估值。',
+    insurance = '保险公司用自己的一套指标：偿付能力充足率、内含价值、新业务价值、投资收益率和退保率；' ..
+                '利润受投资市场和准备金假设影响大，单看 PE 容易误读，估值通常看 PB 和 P/EV。',
+    broker = '证券公司用监管的风险控制指标：风险覆盖率、资本杠杆率、流动性覆盖率、净稳定资金率、' ..
+             '净资本占净资产比例和自营权益敞口；业绩与市场景气高度相关，低 PE 常出现在牛市顶点。',
     other = '该公司类型没有专门的指标模板，这里只展示通用指标和估值。',
     bank = '银行杠杆经营，资产负债率等通用指标不适用；估值上 PB 通常比 PE 更有参考意义。' ..
            '银行的经营现金流包含存贷款变动，PCF 对银行没有意义。',
@@ -43,7 +45,32 @@ local function percentile_view(p)
              min = p.min, median = p.median, max = p.max }
 end
 
-local function build_valuation(data, watch, opts)
+-- Valuation measures that exist for one kind of company and have no daily
+-- history to take a percentile of. P/EV is the one the market actually quotes
+-- for a life insurer: embedded value is reported twice a year, so this is
+-- today's market capitalisation over the newest reported figure.
+local function build_extras(data, latest_row, template)
+    local out = {}
+    if template == 'insurance' then
+        local ev, period
+        for _, r in ipairs(data.reports or {}) do
+            local v = util_num(r.embedded_value)
+            if v and v > 0 then ev, period = v, r.period; break end
+        end
+        local cap = util_num(latest_row.market_cap)
+        if ev and cap then
+            out[#out + 1] = {
+                key = 'pev', label = 'P/EV（总市值 / 内含价值）', value = cap / ev,
+                basis = string.format('%s 总市值 %s ÷ %s 内含价值 %s', latest_row.date,
+                    report_money(cap), period, report_money(ev)),
+                note = '内含价值由保险公司按自己的精算假设计算，假设调整后口径会变，不同公司之间也不完全可比。',
+            }
+        end
+    end
+    return util_json_array(out)
+end
+
+local function build_valuation(data, watch, opts, template)
     local rows = data.valuation or {}
     local latest = valuation_latest(rows)
     if not latest then return nil end
@@ -79,6 +106,7 @@ local function build_valuation(data, watch, opts)
         date = latest.date, close = latest.close,
         market_cap = latest.market_cap, shares = latest.shares,
         metrics = util_json_array(metrics),
+        extras = build_extras(data, latest, template),
         dividend = {
             dps_ttm = div.dps, yield_ttm = div.yield, from = div.from, to = div.to,
             events = util_json_array(div.events),
@@ -183,7 +211,7 @@ function g_exports.analysis_build(data, watch, opts)
             period = latest.period, period_type = latest.period_type,
             name = latest.report_name, notice_date = latest.notice_date,
         } or nil,
-        valuation = build_valuation(data, watch, opts),
+        valuation = build_valuation(data, watch, opts, template),
         quality = quality_build(data.reports or {}, template),
         dividends = build_dividends(data),
         checks = checks_build(data.reports or {}, data.balance or {}, template),

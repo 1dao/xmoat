@@ -396,6 +396,12 @@
     card.append(grid);
 
     const tiles = h('div', { class: 'tiles mt' });
+    for (const x of v.extras || []) {
+      tiles.append(h('div', { class: 'tile' },
+        h('div', { class: 'label', text: x.label }),
+        h('div', { class: 'value num', text: fmtNum(x.value) }),
+        h('div', { class: 'foot', text: [x.basis, x.note].filter(Boolean).join('。') })));
+    }
     const d = v.dividend || {};
     tiles.append(h('div', { class: 'tile' },
       h('div', { class: 'label', text: '股息率（近 12 个月）' }),

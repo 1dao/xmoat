@@ -277,7 +277,12 @@ local function test_checks()
     eq('coverage 140% warns', b.provision_coverage, 'warn')
     eq('core tier 1 at 9% passes', b.core_t1, 'pass')
     eq('banks skip the gross margin check', b.gross_margin_stable, nil)
-    eq('an insurer gets the profit check only', #checks_build(bank, {}, 'insurance'), 1)
+    -- An insurer runs its own checks, not a bank's, on the same reports.
+    local as_insurer = status_of(checks_build(bank, {}, 'insurance'))
+    eq('the shared profit check still runs', as_insurer.profitable, 'pass')
+    eq('but not the bank ratios', as_insurer.npl_ratio, nil)
+    eq('and its own are na without the data', as_insurer.solvency, 'na')
+    eq('a type with no template gets the profit check only', #checks_build(bank, {}, 'other'), 1)
 end
 
 local function test_quality()
@@ -659,6 +664,98 @@ local function test_refresh_events()
     api_call('watchlist.remove', { code = '600519' })
 end
 
+-- ── Phase 5: the insurance and broker templates ─────────────────────────────
+
+local function test_insurer()
+    section('template: insurance')
+    local rep = source_em_parse_reports(fixture('em_reports_601318.json'))
+    eq('保险 is the insurance template', rep.org_type, 'insurance')
+    local latest = rep.reports[1]
+    eq('solvency ratio mapped', latest.solvency_ratio, 198.1)
+    eq('embedded value mapped', latest.embedded_value, 970839000000)
+    eq('new business value mapped', latest.nbv, 24847000000)
+    eq('surrender rate mapped', latest.surrender_rate, 0.64)
+
+    local q = quality_build(rep.reports, 'insurance')
+    local keys = {}
+    for _, s in ipairs(q.series) do keys[s.key] = true end
+    check('the series are the insurer\'s own', keys.solvency_ratio and keys.nbv and keys.embedded_value)
+    check('and not a general company\'s', not keys.gross_margin and not keys.ocf_to_np)
+    local sm = {}
+    for _, s in ipairs(q.summary) do sm[s.key] = s end
+    eq('solvency in the summary', sm.solvency_latest.value, 198.1)
+    -- 36,897 -> 40,024 -> 31,080 over 2023..2025: two years, both ends positive
+    check('new business value has a growth line', sm.nbv_cagr and sm.nbv_cagr.value ~= nil)
+
+    local s = status_of(checks_build(rep.reports, {}, 'insurance'))
+    eq('solvency 198.1% clears the 150% line', s.solvency, 'pass')
+    -- 2025 new business value 368.97亿 vs 2024 400.24亿 = -7.8%, inside -10%
+    eq('new business value down 7.8% still passes', s.nbv_trend, 'pass')
+    eq('a 1.52% surrender rate passes', s.surrender_rate, 'pass')
+    -- The 2025 annual net investment yield is 3.7%, above the 3.5% line
+    eq('net investment yield read from the annual report', s.net_investment_yield, 'pass')
+    eq('insurers skip the bank checks', s.npl_ratio, nil)
+
+    local weak = { R('2025-12-31', { np_parent = 1e9, solvency_ratio = 120, nbv = 5e9,
+                                     surrender_rate = 4.5, net_investment_yield = 2.9 }),
+                   R('2024-12-31', { np_parent = 1e9, nbv = 8e9 }) }
+    local w = status_of(checks_build(weak, {}, 'insurance'))
+    eq('solvency 120% warns', w.solvency, 'warn')
+    eq('new business value down 37.5% warns', w.nbv_trend, 'warn')
+    eq('a 4.5% surrender rate warns', w.surrender_rate, 'warn')
+    eq('a 2.9% net investment yield warns', w.net_investment_yield, 'warn')
+
+    -- P/EV: market capitalisation over the newest reported embedded value.
+    local data = { code = '601318', market = 'SH', name = '中国平安', org_type = 'insurance',
+                   reports = rep.reports, dividends = {},
+                   valuation = { { date = '2026-09-17', close = 60, market_cap = 970839000000 } } }
+    local a = analysis_build(data, nil, {})
+    local pev = a.valuation.extras[1]
+    eq('P/EV is offered for insurers', pev.key, 'pev')
+    near('and equals cap / embedded value', pev.value, 1, 1e-9)
+    check('with the arithmetic shown', pev.basis:find('2026-06-30', 1, true), pev.basis)
+    check('the note says whose assumptions those are', pev.note:find('精算假设', 1, true))
+end
+
+local function test_broker()
+    section('template: broker')
+    local rep = source_em_parse_reports(fixture('em_reports_600030.json'))
+    eq('证券 is the broker template', rep.org_type, 'broker')
+    local latest = rep.reports[1]
+    eq('risk coverage mapped', latest.risk_coverage, 225.31)
+    eq('capital leverage mapped', latest.capital_leverage, 12.7)
+    eq('net capital / net assets mapped', latest.net_capital_ratio, 64.83)
+    eq('proprietary equity exposure mapped', latest.proprietary_equity_ratio, 39.96)
+
+    local q = quality_build(rep.reports, 'broker')
+    local keys = {}
+    for _, s in ipairs(q.series) do keys[s.key] = true end
+    check('the series are the regulator\'s ratios', keys.risk_coverage and keys.capital_leverage
+        and keys.net_capital_ratio)
+
+    local s = status_of(checks_build(rep.reports, {}, 'broker'))
+    for _, key in ipairs({ 'risk_coverage', 'capital_leverage', 'liquidity_coverage',
+                           'net_funding_ratio', 'net_capital_ratio', 'proprietary_equity' }) do
+        eq('a well capitalised broker passes ' .. key, s[key], 'pass')
+    end
+    eq('brokers skip the general checks', s.gross_margin_stable, nil)
+
+    -- At the warning levels, every one of them fires.
+    local tight = { R('2026-06-30', { np_parent = 1e9, risk_coverage = 110, capital_leverage = 9,
+                                      liquidity_coverage = 105, net_funding_ratio = 110,
+                                      net_capital_ratio = 21, proprietary_equity_ratio = 95 }) }
+    local t = status_of(checks_build(tight, {}, 'broker'))
+    eq('risk coverage 110% warns', t.risk_coverage, 'warn')
+    eq('capital leverage 9% warns', t.capital_leverage, 'warn')
+    eq('liquidity coverage 105% warns', t.liquidity_coverage, 'warn')
+    eq('net stable funding 110% warns', t.net_funding_ratio, 'warn')
+    eq('net capital at 21% of net assets warns', t.net_capital_ratio, 'warn')
+    eq('a 95% equity exposure warns', t.proprietary_equity, 'warn')
+
+    local bare = status_of(checks_build({ R('2026-06-30', { np_parent = 1 }) }, {}, 'broker'))
+    eq('missing ratios are na, not pass', bare.risk_coverage, 'na')
+end
+
 -- ── Phase 4: business breakdown, language models, insights ──────────────────
 
 local function business_record()
@@ -872,6 +969,8 @@ local function run_all()
     test_business()
     test_llm()
     test_insight()
+    test_insurer()
+    test_broker()
 end
 
 return {

@@ -104,6 +104,23 @@ local REPORT_FIELDS = {
     NONPERLOAN = 'npl_ratio', BLDKBBL = 'provision_coverage',
     NET_INTEREST_MARGIN = 'nim', NEWCAPITALADER = 'car', HXYJBCZL = 'core_t1',
     LOAN_PROVISION_RATIO = 'loan_provision_ratio',
+    -- insurers. Solvency and embedded value are point-in-time; the premium,
+    -- the new business value and the yields are flows, cumulative in an
+    -- interim report like every other flow item here.
+    SOLVENCY_AR = 'solvency_ratio', NHJZ_CURRENT_AMT = 'embedded_value',
+    NBV_LIFE = 'nbv', NBV_RATE = 'nbv_rate',
+    EARNED_PREMIUM = 'earned_premium', COMPENSATE_EXPENSE = 'claims_expense',
+    SURRENDER_RATE_LIFE = 'surrender_rate',
+    NET_ROI = 'net_investment_yield', TOTAL_ROI = 'total_investment_yield',
+    -- brokers. All of these are the regulator's own risk-control ratios
+    -- (《证券公司风险控制指标管理办法》), reported point-in-time.
+    JZB = 'net_capital', JZC = 'net_assets', JZBJZC = 'net_capital_ratio',
+    RISK_COVERAGE = 'risk_coverage', CAPITAL_LEVERAGE_RATIO = 'capital_leverage',
+    LIQUIDITY_COVERAGE_RATIO = 'liquidity_coverage', NET_FUNDING_RATIO = 'net_funding_ratio',
+    NET_CAPITAL_LIABILITIES = 'net_capital_to_liabilities',
+    NET_ASSETS_LIABILITIES = 'net_assets_to_liabilities',
+    PROPRIETARY_CAPITAL = 'proprietary_equity_ratio',
+    ZYGDSYLZQJZB = 'proprietary_fixed_income_ratio',
 }
 
 -- Parse one response document. Returns
