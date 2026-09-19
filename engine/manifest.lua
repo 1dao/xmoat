@@ -27,6 +27,7 @@ return {
     'engine/alerts.lua',     -- alerts_*    the alert log, pushing, the check
     'engine/watch.lua',      -- watch_*     the watchlist
     'engine/stock.lua',      -- stock_*     refresh and read one stock
+    'engine/market.lua',     -- market_*    the whole market, and screening it
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry

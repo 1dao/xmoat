@@ -664,6 +664,115 @@ local function test_refresh_events()
     api_call('watchlist.remove', { code = '600519' })
 end
 
+-- ── Phase 5: screening the whole market ─────────────────────────────────────
+
+local function market_page(rows, count, page_size)
+    local data = {}
+    for _, r in ipairs(rows) do data[#data + 1] = r end
+    return { result = { data = data, count = count or #rows,
+                        pages = math.ceil((count or #rows) / (page_size or 2000)) } }
+end
+
+local function test_market()
+    section('market snapshot')
+    eq('60 is the main board', market_board('600519'), 'main')
+    eq('00 too', market_board('000001'), 'main')
+    eq('30 is ChiNext', market_board('300750'), 'gem')
+    eq('68 is the STAR market', market_board('688336'), 'star')
+    eq('83 is Beijing', market_board('830799'), 'bj')
+    check('ST is read off the name', market_is_st('*ST 某某') and market_is_st('ST康美'))
+    check('and an ordinary name is not', not market_is_st('贵州茅台'))
+    -- Annual reports land between January and April, so before May the year
+    -- before last is the one every company has filed.
+    eq('in March, the year before last', market_annual_period('2026-03-15'), '2024-12-31')
+    eq('in May, last year', market_annual_period('2026-05-01'), '2025-12-31')
+
+    local valuation = {
+        { SECURITY_CODE = '600001', SECURITY_NAME_ABBR = '甲公司', BOARD_NAME = '白酒Ⅱ',
+          TOTAL_MARKET_CAP = 5e10, CLOSE_PRICE = 50, PE_TTM = 12, PB_MRQ = 3, PS_TTM = 4, PCF_OCF_TTM = 9 },
+        { SECURITY_CODE = '300002', SECURITY_NAME_ABBR = '乙公司', BOARD_NAME = '软件开发',
+          TOTAL_MARKET_CAP = 8e9, CLOSE_PRICE = 20, PE_TTM = -8, PB_MRQ = 6, PS_TTM = 20, PCF_OCF_TTM = -3 },
+        { SECURITY_CODE = '600003', SECURITY_NAME_ABBR = 'ST丙', BOARD_NAME = '白酒Ⅱ',
+          TOTAL_MARKET_CAP = 2e9, CLOSE_PRICE = 4, PE_TTM = 40, PB_MRQ = 1, PS_TTM = 2, PCF_OCF_TTM = 5 },
+    }
+    local reports = {
+        { SECURITY_CODE = '600001', SECURITY_NAME_ABBR = '甲公司', WEIGHTAVG_ROE = 25,
+          TOTAL_OPERATE_INCOME = 1e10, PARENT_NETPROFIT = 3e9, YSTZ = 12, SJLTZ = 18,
+          XSMLL = 60, BASIC_EPS = 2, DEDUCT_BASIC_EPS = 1.9, BPS = 10, MGJYXJJE = 2.4,
+          NOTICE_DATE = '2026-03-20 00:00:00' },
+        { SECURITY_CODE = '300002', SECURITY_NAME_ABBR = '乙公司', WEIGHTAVG_ROE = -5,
+          TOTAL_OPERATE_INCOME = 4e8, PARENT_NETPROFIT = -1e8, YSTZ = 40, SJLTZ = -200,
+          XSMLL = 70, BASIC_EPS = -0.3, BPS = 3, MGJYXJJE = 0.1 },
+        { SECURITY_CODE = '600003', SECURITY_NAME_ABBR = 'ST丙', WEIGHTAVG_ROE = 30,
+          TOTAL_OPERATE_INCOME = 1e9, PARENT_NETPROFIT = 2e8, YSTZ = 5, SJLTZ = 3,
+          XSMLL = 20, BASIC_EPS = 0.5, BPS = 2, MGJYXJJE = 0.2 },
+    }
+
+    local parsed = source_em_parse_market_valuation(market_page(valuation, 5565))
+    eq('valuation rows parsed', #parsed.rows, 3)
+    eq('and the page count comes from the source', parsed.pages, 3)
+    eq('code kept', parsed.rows[1].code, '600001')
+    eq('industry kept', parsed.rows[1].industry, '白酒Ⅱ')
+    eq('an empty result is empty, not an error',
+        #source_em_parse_market_valuation(fixture('em_empty.json')).rows, 0)
+    eq('a wrong shape is an error', (source_em_parse_market_valuation({ foo = 1 })), nil)
+
+    local fin = source_em_parse_market_reports(market_page(reports, 5574, 500))
+    eq('report rows parsed', #fin.rows, 3)
+    eq('weighted ROE mapped', fin.rows[1].roe, 25)
+    eq('revenue growth mapped', fin.rows[1].revenue_yoy, 12)
+    eq('per-share operating cash flow mapped', fin.rows[1].ocfps, 2.4)
+
+    -- Refresh through the real path, with the two tables served as one page each.
+    __net_set_transport(function(url)
+        if url:find('TRADE_DATE&sortTypes=-1', 1, true) then
+            return { status = 200, body = util_json_encode(
+                { result = { data = { { TRADE_DATE = '2026-09-18 00:00:00' } }, count = 1, pages = 1 } }) }
+        elseif url:find('RPT_VALUEANALYSIS_DET', 1, true) then
+            return { status = 200, body = util_json_encode(market_page(valuation)) }
+        elseif url:find('RPT_LICO_FN_CPD', 1, true) then
+            return { status = 200, body = util_json_encode(market_page(reports, 3, 500)) }
+        end
+        return nil, 'unexpected URL in test: ' .. url
+    end)
+    local st = api_call('market.refresh')
+    check('refresh succeeds', st.ok, st.error and st.error.message)
+    eq('the snapshot knows its trade date', st.ok and st.data.trade_date, '2026-09-18')
+    eq('and how many rows carry figures', st.ok and st.data.with_reports, 3)
+    __net_set_transport(nil)
+
+    local function screen(q)
+        local res = api_call('market.screen', q)
+        return res.ok and res.data or nil, res.error
+    end
+    local all = screen({})
+    eq('ST is excluded by default', all.matched, 2)
+    eq('unless asked for', screen({ include_st = 'true' }).matched, 3)
+    eq('ROE filter', screen({ roe_min = 20 }).matched, 1)
+    eq('a PE ceiling excludes a loss-maker', screen({ pe_max = 100 }).matched, 1)
+    eq('market cap is given in 亿', screen({ cap_min = 100 }).matched, 1)
+    eq('board filter', screen({ boards = 'gem' }).matched, 1)
+    eq('industry is a substring', screen({ industry = '白酒' }).matched, 1)
+    eq('keyword matches the name', screen({ keyword = '乙' }).matched, 1)
+    eq('keyword matches the code too', screen({ keyword = '600001' }).matched, 1)
+    -- 2.4 / 2 = 1.2 for 甲; 乙 has a negative EPS and cannot qualify.
+    eq('cash flow over EPS', screen({ ocf_to_eps_min = 1 }).matched, 1)
+    eq('a row missing the figure never passes a filter on it',
+        screen({ gross_margin_min = 0, keyword = '600003', include_st = 'true' }).matched, 1)
+
+    local sorted = screen({ include_st = 'true', sort = 'pb', order = 'asc' })
+    eq('sorting ascending', sorted.rows[1].code, '600003')
+    eq('sorting descending', screen({ include_st = 'true', sort = 'pb' }).rows[1].code, '300002')
+    eq('limit caps the rows but not the count', #screen({ include_st = 'true', limit = 1 }).rows, 1)
+    eq('the count is still the full match', screen({ include_st = 'true', limit = 1 }).matched, 3)
+    eq('an unknown sort is refused', api_call('market.screen', { sort = 'nope' }).error.code, 'bad_request')
+    eq('an unknown board is refused', api_call('market.screen', { boards = 'nope' }).error.code, 'bad_request')
+
+    local row = all.rows[1]
+    eq('the row carries what the table showed', row.code, '600001')
+    near('with the derived cash-flow ratio', row.ocf_to_eps, 1.2, 1e-9)
+end
+
 -- ── Phase 5: the insurance and broker templates ─────────────────────────────
 
 local function test_insurer()
@@ -943,7 +1052,8 @@ local DATA = 'tmp/unit-data'
 
 local function clean()
     for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
-                         'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json' }) do
+                         'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json',
+                         'market.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -971,6 +1081,7 @@ local function run_all()
     test_insight()
     test_insurer()
     test_broker()
+    test_market()
 end
 
 return {

@@ -11,6 +11,7 @@
 --   <DATA_DIR>/watchlist.json
 --   <DATA_DIR>/alerts.json          the alert log
 --   <DATA_DIR>/state.json           scheduler bookkeeping
+--   <DATA_DIR>/market.json          the whole-market snapshot for screening
 --   <DATA_DIR>/stocks/<code>.json
 --   <DATA_DIR>/insights/<code>.json  language-model readings, kept apart from
 --                                    source data on purpose
@@ -45,7 +46,7 @@ end
 
 local function path_of(name)
     assert(root, 'store_init has not run')
-    if name == 'watchlist' or name == 'alerts' or name == 'state' then
+    if name == 'watchlist' or name == 'alerts' or name == 'state' or name == 'market' then
         return util_path_join(root, name .. '.json')
     end
     local code = name:match('^stock:(%d%d%d%d%d%d)$')

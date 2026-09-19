@@ -65,6 +65,9 @@
 | `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
 | `notify.test` | `POST /api/v1/notify/test` | — | `PushResult[]`；没有配置渠道时为 `bad_request` |
 | `schedule.status` | `GET /api/v1/schedule` | — | `ScheduleStatus` |
+| `market.status` | `GET /api/v1/market` | — | `MarketStatus` |
+| `market.refresh` | `POST /api/v1/market/refresh` | — | `MarketStatus`（抓取全市场快照，约 15 次请求） |
+| `market.screen` | `GET /api/v1/market/screen` | 见下 | `ScreenResult` |
 | `llm.status` | `GET /api/v1/llm` | — | `{enabled, provider?, model?, hint?}`，不含密钥 |
 | `insight.get` | `GET /api/v1/stocks/:code/insight` | — | `Insight`（已保存的，不联网）；没有则 `not_found` |
 | `insight.generate` | `POST /api/v1/stocks/:code/insight` | — | `Insight`（调用大模型，会产生费用） |
@@ -252,6 +255,44 @@ type ScheduleStatus = {
 ```
 
 推送给 Webhook 渠道的请求体是 `{ source: 'xmoat', title, text, markdown, events: Alert[] }`。
+
+### MarketStatus 与 ScreenResult
+
+全市场快照是两张表按代码合并：当日估值（PE、PB、PS、PCF、市值、收盘价）和最近一个**年报**的业绩
+（ROE、营收、净利润及同比、毛利率、每股经营现金流）。用年报而不是最近一期，是为了让所有公司可比。
+
+```ts
+type MarketStatus = {
+  ready: boolean, refreshing: boolean,
+  trade_date?: string, report_period?: string, fetched_at?: string,
+  total?: number,          // 快照里的股票数
+  with_reports?: number,   // 其中有业绩数据的
+  hint?: string,           // ready 为 false 时的说明
+}
+
+type ScreenResult = {
+  snapshot: MarketStatus, matched: number,   // 符合条件的总数（不受 limit 限制）
+  sort: string, order: 'asc' | 'desc',
+  rows: {
+    code: string, name: string, industry?: string,
+    board: 'main' | 'gem' | 'star' | 'bj' | 'other', st?: true,
+    close?: number, market_cap?: number,
+    pe_ttm?: number, pb?: number, ps_ttm?: number, pcf_ttm?: number,
+    roe?: number, revenue?: number, revenue_yoy?: number,
+    np_parent?: number, np_parent_yoy?: number, gross_margin?: number,
+    eps?: number, ocfps?: number, ocf_to_eps?: number,   // 每股经营现金流 / 每股收益
+    notice_date?: string,
+  }[],
+}
+```
+
+`market.screen` 的条件全部可选：`roe_min`、`roe_max`、`pe_min`、`pe_max`、`pb_max`、`ps_max`、
+`cap_min`、`cap_max`（亿元）、`revenue_yoy_min`、`np_yoy_min`、`gross_margin_min`、`ocf_to_eps_min`、
+`industry`（行业名包含）、`keyword`（名称或代码包含）、`boards`（逗号分隔：main、gem、star、bj）、
+`include_st`、`sort`、`order`、`limit`（默认 50，最多 500）。
+
+两点约定：**缺这个数据的股票不会通过针对它的条件**（没有 ROE 的公司不会出现在"ROE ≥ 15%"的结果里）；
+**设了 `pe_max` 会自动排除亏损股**，否则负的 PE 会低于任何上限。
 
 ### Insight
 

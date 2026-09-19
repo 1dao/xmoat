@@ -45,6 +45,8 @@ local USAGE = [[
   check                     立即检查：刷新全部自选股，记录变化并推送
   alerts [代码]             最近的提醒
   notify-test               向已配置的推送渠道发送测试消息
+  market-refresh            抓取全市场快照（约 15 次请求）
+  screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
   insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
   ask <代码> <问题>         就这只股票提问（会产生费用）
   call <命令名> [k=v ...]   调用任意命令，输出 JSON，如 call stock.valuation code=600519 years=5
@@ -167,6 +169,44 @@ local function run()
             if not r.ok then bad = bad + 1 end
         end
         return bad > 0 and 1 or 0
+    elseif cmd == 'market-refresh' then
+        local st = call('market.refresh', {})
+        if not st then return 1 end
+        out(string.format('全市场快照已更新：%d 只，估值日期 %s，业绩期 %s（%d 只有业绩数据）',
+            st.total or 0, tostring(st.trade_date), tostring(st.report_period), st.with_reports or 0))
+        return 0
+    elseif cmd == 'screen' then
+        local params = {}
+        for i = 2, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if not k then err('参数应为 key=value：' .. args[i]); return 2 end
+            params[k] = v
+        end
+        local res = call('market.screen', params)
+        if not res then return 1 end
+        local snap = res.snapshot or {}
+        out(string.format('%d 只符合条件（共 %d 只，估值 %s，业绩 %s），按 %s %s 排序，显示前 %d 只',
+            res.matched or 0, snap.total or 0, tostring(snap.trade_date), tostring(snap.report_period),
+            res.sort, res.order, #res.rows))
+        if #res.rows == 0 then return 0 end
+        out('')
+        out('| 代码 | 名称 | 行业 | 市值 | PE(TTM) | PB | ROE | 营收同比 | 净利同比 | 毛利率 | 现金流/EPS |')
+        out('|---|---|---|---|---|---|---|---|---|---|---|')
+        local function n(v, d)
+            if type(v) ~= 'number' then return '—' end
+            return string.format('%.' .. (d or 2) .. 'f', v)
+        end
+        -- A missing value prints as a dash and nothing else: a bank has no
+        -- gross margin, and "—%" reads as a number that failed to format.
+        local function pc(v) return type(v) == 'number' and report_pct(v) or '—' end
+        for _, r in ipairs(res.rows) do
+            out(string.format('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |',
+                r.code, r.name or '', r.industry or '',
+                type(r.market_cap) == 'number' and report_money(r.market_cap) or '—',
+                n(r.pe_ttm, 1), n(r.pb), pc(r.roe), pc(r.revenue_yoy),
+                pc(r.np_parent_yoy), pc(r.gross_margin), n(r.ocf_to_eps)))
+        end
+        return 0
     elseif cmd == 'insight' then
         if not args[2] then err(USAGE); return 2 end
         local ins

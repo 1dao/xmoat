@@ -273,6 +273,119 @@ function g_exports.source_em_fetch_balance(sec, periods)
 end
 
 -- ---------------------------------------------------------------------------
+-- The whole market, in two snapshots
+--
+-- A screener cannot fetch five and a half thousand stocks one at a time, so it
+-- reads two market-wide tables instead:
+--
+--   RPT_VALUEANALYSIS_DET filtered by one TRADE_DATE — the same daily valuation
+--       table a single stock's history comes from, sliced across the market
+--       instead of across time. 2000 rows per page.
+--   RPT_LICO_FN_CPD filtered by one REPORTDATE — every A-share's headline
+--       figures for that period (ROE, revenue, profit, their growth, gross
+--       margin, per-share cash flow). 500 rows per page, whatever is asked.
+--
+-- Both are paged by the caller; engine/market.lua does the paging and the
+-- pacing. What is NOT here: dividends, which have no market-wide table, so a
+-- screen cannot filter on yield.
+-- ---------------------------------------------------------------------------
+
+local MARKET_VAL_COLUMNS = 'SECURITY_CODE,SECURITY_NAME_ABBR,BOARD_NAME,TOTAL_MARKET_CAP,' ..
+    'CLOSE_PRICE,PE_TTM,PB_MRQ,PS_TTM,PCF_OCF_TTM'
+
+local function paged(doc)
+    local result = type(doc) == 'table' and type(doc.result) == 'table' and doc.result
+    if not result or type(result.data) ~= 'table' then return nil end
+    return result
+end
+
+-- Returns { rows, count, pages } or nil plus a message.
+function g_exports.source_em_parse_market_valuation(doc)
+    if type(doc) == 'table' and doc.result == util_null then
+        return { rows = {}, count = 0, pages = 0 }
+    end
+    local result = paged(doc)
+    if not result then return nil, 'unexpected response shape (no result.data)' end
+    local rows = {}
+    for _, row in ipairs(result.data) do
+        local code = str(row.SECURITY_CODE)
+        if code then
+            rows[#rows + 1] = {
+                code = code, name = str(row.SECURITY_NAME_ABBR), industry = str(row.BOARD_NAME),
+                market_cap = num(row.TOTAL_MARKET_CAP), close = num(row.CLOSE_PRICE),
+                pe_ttm = num(row.PE_TTM), pb = num(row.PB_MRQ),
+                ps_ttm = num(row.PS_TTM), pcf_ttm = num(row.PCF_OCF_TTM),
+            }
+        end
+    end
+    return { rows = rows, count = num(result.count) or #rows, pages = num(result.pages) or 1 }
+end
+
+-- The newest trading day the valuation table carries, as 'YYYY-MM-DD'.
+function g_exports.source_em_fetch_trade_date()
+    local url = DATACENTER_WEB .. '?sortColumns=TRADE_DATE&sortTypes=-1&pageSize=1&pageNumber=1' ..
+        '&reportName=RPT_VALUEANALYSIS_DET&columns=TRADE_DATE&source=WEB&client=WEB'
+    local doc, err = net_get_json(url)
+    if not doc then return nil, err end
+    local result = paged(doc)
+    local row = result and result.data[1]
+    local date = row and day(row.TRADE_DATE)
+    if not date then return nil, '无法确定最新交易日' end
+    return date
+end
+
+function g_exports.source_em_fetch_market_valuation(date, page, page_size)
+    local url = DATACENTER_WEB .. '?sortColumns=SECURITY_CODE&sortTypes=1' ..
+        '&pageSize=' .. tostring(page_size or 2000) .. '&pageNumber=' .. tostring(page or 1) ..
+        '&reportName=RPT_VALUEANALYSIS_DET&columns=' .. MARKET_VAL_COLUMNS ..
+        '&quoteColumns=&source=WEB&client=WEB&filter=(TRADE_DATE%3D%27' .. date .. '%27)'
+    local doc, err = net_get_json(url, { timeout_ms = 60000 })
+    if not doc then return nil, err end
+    return source_em_parse_market_valuation(doc)
+end
+
+local MARKET_FIN_COLUMNS = 'SECURITY_CODE,SECURITY_NAME_ABBR,WEIGHTAVG_ROE,TOTAL_OPERATE_INCOME,' ..
+    'PARENT_NETPROFIT,YSTZ,SJLTZ,XSMLL,BASIC_EPS,DEDUCT_BASIC_EPS,BPS,MGJYXJJE,NOTICE_DATE'
+
+function g_exports.source_em_parse_market_reports(doc)
+    if type(doc) == 'table' and doc.result == util_null then
+        return { rows = {}, count = 0, pages = 0 }
+    end
+    local result = paged(doc)
+    if not result then return nil, 'unexpected response shape (no result.data)' end
+    local rows = {}
+    for _, row in ipairs(result.data) do
+        local code = str(row.SECURITY_CODE)
+        if code then
+            rows[#rows + 1] = {
+                code = code, name = str(row.SECURITY_NAME_ABBR),
+                roe = num(row.WEIGHTAVG_ROE),                 -- weighted, as everywhere else
+                revenue = num(row.TOTAL_OPERATE_INCOME), np_parent = num(row.PARENT_NETPROFIT),
+                revenue_yoy = num(row.YSTZ), np_parent_yoy = num(row.SJLTZ),
+                gross_margin = num(row.XSMLL),
+                eps = num(row.BASIC_EPS), eps_deducted = num(row.DEDUCT_BASIC_EPS),
+                bps = num(row.BPS), ocfps = num(row.MGJYXJJE),
+                notice_date = day(row.NOTICE_DATE),
+            }
+        end
+    end
+    return { rows = rows, count = num(result.count) or #rows, pages = num(result.pages) or 1 }
+end
+
+-- `period` is a report date, 'YYYY-12-31' for an annual one. A shares only
+-- (SECURITY_TYPE_CODE 058001001); the table also carries B shares.
+function g_exports.source_em_fetch_market_reports(period, page, page_size)
+    local url = DATACENTER_WEB .. '?sortColumns=SECURITY_CODE&sortTypes=1' ..
+        '&pageSize=' .. tostring(page_size or 500) .. '&pageNumber=' .. tostring(page or 1) ..
+        '&reportName=RPT_LICO_FN_CPD&columns=' .. MARKET_FIN_COLUMNS ..
+        '&filter=(REPORTDATE%3D%27' .. period .. '%27)(SECURITY_TYPE_CODE%3D%22058001001%22)' ..
+        '&source=DataCenter&client=WEB'
+    local doc, err = net_get_json(url, { timeout_ms = 60000 })
+    if not doc then return nil, err end
+    return source_em_parse_market_reports(doc)
+end
+
+-- ---------------------------------------------------------------------------
 -- Business: F10 BusinessAnalysis/PageAjax ("经营分析")
 --
 -- Three things in one response:

@@ -78,6 +78,17 @@ sites use the short name. Entry points run twice (loader detour) — see the top
 - Signing vectors for DingTalk and Feishu in `test/unit.lua` were computed
   independently (Python hmac); keep them when touching `notify_build`.
 
+## Screening
+
+- `engine/market.lua` keeps its own snapshot (`data/market.json`): two
+  market-wide Eastmoney tables joined by code — today's valuation and the
+  latest ANNUAL report's figures. Annual on purpose: every company has the
+  same period, and an interim ROE is not annualised.
+- A filter never keeps a row that lacks the figure it asks about, and a
+  `pe_max` implies profitability (a negative PE undercuts any ceiling).
+- What the snapshot cannot carry — dividend yield, valuation percentiles, the
+  checklist — is per-stock work; the screen narrows, `stock.refresh` judges.
+
 ## Language model (optional)
 
 - `engine/llm.lua` speaks two wire formats and nothing else: Claude's Messages

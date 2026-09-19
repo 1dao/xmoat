@@ -145,13 +145,17 @@
     const token = ++renderToken;
     if (activeChart) { activeChart.destroy(); activeChart = null; }
     const m = location.hash.match(/^#\/stock\/([0-9A-Za-z.]+)$/);
-    const page = m ? 'stock' : location.hash === '#/alerts' ? 'alerts' : 'watchlist';
+    const page = m ? 'stock'
+      : location.hash === '#/alerts' ? 'alerts'
+      : location.hash === '#/screen' ? 'screen'
+      : 'watchlist';
     for (const link of document.querySelectorAll('[data-nav]')) {
       if (link.dataset.nav === page) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
     if (m) return renderStock(m[1], token);
     if (page === 'alerts') return renderAlerts(token);
+    if (page === 'screen') return renderScreen(token);
     return renderWatchlist(token);
   }
 
@@ -709,6 +713,183 @@
       });
     });
     return h('div', { class: 'mt' }, h('div', { class: 'label-sm', text: '提问（回答只依据上面的事实，会产生模型费用）' }), log, form);
+  }
+
+  // ── screening the whole market ─────────────────────────────────────────────
+
+  const SCREEN_FIELDS = [
+    { name: 'roe_min', label: 'ROE ≥', unit: '%' },
+    { name: 'pe_max', label: 'PE(TTM) ≤' },
+    { name: 'pb_max', label: 'PB ≤' },
+    { name: 'cap_min', label: '市值 ≥', unit: '亿' },
+    { name: 'np_yoy_min', label: '净利同比 ≥', unit: '%' },
+    { name: 'revenue_yoy_min', label: '营收同比 ≥', unit: '%' },
+    { name: 'gross_margin_min', label: '毛利率 ≥', unit: '%' },
+    { name: 'ocf_to_eps_min', label: '现金流/EPS ≥' },
+  ];
+  const BOARDS = [['main', '主板'], ['gem', '创业板'], ['star', '科创板'], ['bj', '北交所']];
+  const SCREEN_SORTS = [['roe', 'ROE'], ['pe_ttm', 'PE(TTM)'], ['pb', 'PB'], ['market_cap', '市值'],
+    ['np_parent_yoy', '净利同比'], ['revenue_yoy', '营收同比'], ['gross_margin', '毛利率']];
+  // The last screen, kept for this browser only, so the page comes back as it was.
+  const SCREEN_KEY = 'xmoat.screen';
+
+  function readScreenForm(form) {
+    const q = {};
+    for (const el of form.elements) {
+      if (!el.name || el.type === 'submit') continue;
+      if (el.type === 'checkbox') {
+        if (el.name === 'boards') continue;
+        if (el.checked) q[el.name] = 'true';
+      } else if (el.value !== '') q[el.name] = el.value;
+    }
+    const boards = [...form.querySelectorAll('input[name="boards"]:checked')].map(b => b.value);
+    if (boards.length && boards.length < BOARDS.length) q.boards = boards.join(',');
+    return q;
+  }
+
+  async function renderScreen(token) {
+    document.title = '筛选 · xmoat';
+    setView(loading());
+    let status;
+    try { status = await api('GET', '/api/v1/market'); }
+    catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
+    if (stale(token)) return;
+
+    const saved = (() => {
+      try { return JSON.parse(storage(s => s.getItem(SCREEN_KEY)) || '{}'); } catch (e) { return {}; }
+    })();
+
+    const refresh = h('button', { class: status.ready ? 'btn' : 'btn btn-primary',
+      text: status.ready ? '刷新快照' : '抓取快照' });
+    refresh.addEventListener('click', () => busy(refresh, '抓取中…', async () => {
+      const st = await api('POST', '/api/v1/market/refresh');
+      showStatus(`快照已更新：${st.total} 只，估值 ${st.trade_date}，业绩 ${st.report_period}`);
+      route();
+    }));
+
+    const head = h('div', { class: 'page-head' },
+      h('h1', { text: '筛选' }),
+      h('span', { class: 'meta', text: status.ready
+        ? `${status.total} 只 · 估值 ${status.trade_date} · 业绩 ${status.report_period}`
+        : '还没有快照' }),
+      h('span', { class: 'spacer' }), refresh);
+
+    if (!status.ready) {
+      setView(head, h('div', { class: 'card empty' },
+        h('p', { text: status.hint || '还没有全市场快照。' }),
+        h('p', { class: 'muted', text: '快照包含当日估值和最近一个年报的业绩，抓一次约十几秒。' })));
+      return;
+    }
+
+    const form = h('form', { class: 'screen-form' });
+    for (const f of SCREEN_FIELDS) {
+      form.append(h('label', { class: 'field' },
+        h('span', { text: f.label + (f.unit ? `（${f.unit}）` : '') }),
+        h('input', { type: 'number', step: 'any', name: f.name, value: saved[f.name] ?? undefined })));
+    }
+    form.append(h('label', { class: 'field' }, h('span', { text: '行业包含' }),
+      h('input', { type: 'text', name: 'industry', value: saved.industry ?? undefined })));
+    form.append(h('label', { class: 'field' }, h('span', { text: '名称或代码' }),
+      h('input', { type: 'text', name: 'keyword', value: saved.keyword ?? undefined })));
+
+    const savedBoards = (saved.boards || '').split(',').filter(Boolean);
+    const boardBox = h('div', { class: 'field' }, h('span', { text: '板块' }));
+    const boardRow = h('div', { class: 'checks-row' });
+    for (const [value, label] of BOARDS) {
+      boardRow.append(h('label', { class: 'check' },
+        h('input', { type: 'checkbox', name: 'boards', value,
+          checked: savedBoards.length === 0 || savedBoards.includes(value) }),
+        h('span', { text: label })));
+    }
+    boardRow.append(h('label', { class: 'check' },
+      h('input', { type: 'checkbox', name: 'include_st', checked: saved.include_st === 'true' }),
+      h('span', { text: '包含 ST' })));
+    boardBox.append(boardRow);
+    form.append(boardBox);
+
+    form.append(h('label', { class: 'field' }, h('span', { text: '排序' }),
+      h('select', { name: 'sort' }, SCREEN_SORTS.map(([v, l]) =>
+        h('option', { value: v, text: l, selected: (saved.sort || 'roe') === v })))));
+    form.append(h('label', { class: 'field' }, h('span', { text: '方向' }),
+      h('select', { name: 'order' },
+        h('option', { value: 'desc', text: '从高到低', selected: (saved.order || 'desc') === 'desc' }),
+        h('option', { value: 'asc', text: '从低到高', selected: saved.order === 'asc' }))));
+
+    const run = h('button', { class: 'btn btn-primary', type: 'submit', text: '筛选' });
+    const reset = h('button', { class: 'btn btn-quiet', type: 'button', text: '清空' });
+    form.append(h('div', { class: 'field field-actions' }, run, reset));
+
+    const results = h('section', { class: 'card' },
+      h('p', { class: 'muted', text: '设好条件后点“筛选”。条件留空表示不限制。' }));
+
+    async function submit() {
+      const q = readScreenForm(form);
+      storage(s => s.setItem(SCREEN_KEY, JSON.stringify(q)));
+      await busy(run, '筛选中…', async () => {
+        const res = await api('GET', '/api/v1/market/screen?' +
+          new URLSearchParams({ ...q, limit: '100' }).toString());
+        if (stale(token)) return;
+        results.textContent = '';
+        results.append(h('div', { class: 'card-head' },
+          h('h2', { text: `${res.matched} 只符合条件` }),
+          h('span', { class: 'muted', text: res.rows.length < res.matched ? `显示前 ${res.rows.length} 只` : '' })));
+        if (!res.rows.length) {
+          results.append(h('p', { class: 'muted', text: '没有符合条件的股票，放宽一些试试。' }));
+          return;
+        }
+        results.append(h('div', { class: 'table-wrap' }, h('table', {},
+          h('thead', {}, h('tr', {},
+            h('th', { text: '股票' }), h('th', { class: 'r', text: '市值' }),
+            h('th', { class: 'r', text: 'PE(TTM)' }), h('th', { class: 'r', text: 'PB' }),
+            h('th', { class: 'r', text: 'ROE' }), h('th', { class: 'r', text: '营收同比' }),
+            h('th', { class: 'r', text: '净利同比' }), h('th', { class: 'r', text: '毛利率' }),
+            h('th', { class: 'r', text: '现金流/EPS' }), h('th', { text: '' }))),
+          h('tbody', {}, res.rows.map(r => screenRow(r))))));
+        results.append(h('p', { class: 'muted small', text:
+          `ROE、同比、毛利率来自 ${res.snapshot.report_period} 年报；估值为 ${res.snapshot.trade_date} 收盘。` +
+          '筛选只是缩小范围，具体是否便宜要看个股页里它自己的历史分位和检查清单。' }));
+      });
+    }
+
+    form.addEventListener('submit', e => { e.preventDefault(); submit(); });
+    reset.addEventListener('click', () => {
+      form.reset();
+      for (const b of form.querySelectorAll('input[name="boards"]')) b.checked = true;
+      storage(s => s.removeItem(SCREEN_KEY));
+    });
+
+    setView(head, h('section', { class: 'card' }, form), results);
+    if (Object.keys(saved).length) submit();
+  }
+
+  function screenRow(r) {
+    const open = () => { location.hash = '#/stock/' + r.code; };
+    const add = h('button', { class: 'btn btn-small btn-quiet', text: '加入自选' });
+    add.addEventListener('click', async e => {
+      e.stopPropagation();
+      // busy() restores the button when it finishes, so the "added" state is
+      // set after it returns, not inside it.
+      const added = await busy(add, '…', async () => {
+        await api('POST', '/api/v1/watchlist', { code: r.code });
+        showStatus(`已加入 ${r.name || r.code}，可在自选里刷新它的完整数据`);
+        return true;
+      });
+      if (added) { add.textContent = '已加入'; add.disabled = true; }
+    });
+    const pct = v => (isNum(v) ? fmtPct(v) : '—');
+    return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
+      h('td', {}, h('span', { class: 'name', text: r.name || r.code }), ' ',
+        h('span', { class: 'code', text: r.code }),
+        h('span', { class: 'sub', text: r.industry || '' })),
+      h('td', { class: 'r num', 'data-label': '市值', text: fmtMoney(r.market_cap) }),
+      h('td', { class: 'r num', 'data-label': 'PE(TTM)', text: fmtNum(r.pe_ttm, 1) }),
+      h('td', { class: 'r num', 'data-label': 'PB', text: fmtNum(r.pb) }),
+      h('td', { class: 'r num', 'data-label': 'ROE', text: pct(r.roe) }),
+      h('td', { class: 'r num', 'data-label': '营收同比', text: pct(r.revenue_yoy) }),
+      h('td', { class: 'r num', 'data-label': '净利同比', text: pct(r.np_parent_yoy) }),
+      h('td', { class: 'r num', 'data-label': '毛利率', text: pct(r.gross_margin) }),
+      h('td', { class: 'r num', 'data-label': '现金流/EPS', text: fmtNum(r.ocf_to_eps) }),
+      h('td', { class: 'r' }, add));
   }
 
   // ── alerts ─────────────────────────────────────────────────────────────────

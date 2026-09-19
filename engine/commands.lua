@@ -318,8 +318,73 @@ local function install_insight()
     })
 end
 
+local function install_market()
+    api_define({
+        name = 'market.status', method = 'GET', path = '/api/v1/market',
+        summary = '全市场快照的日期、覆盖数量和是否正在刷新',
+        handler = function() return market_status() end,
+    })
+
+    api_define({
+        name = 'market.refresh', method = 'POST', path = '/api/v1/market/refresh',
+        summary = '抓取全市场快照：当日估值 + 最近一个年报的业绩（约 15 次请求）',
+        handler = function() return market_refresh() end,
+    })
+
+    api_define({
+        name = 'market.screen', method = 'GET', path = '/api/v1/market/screen',
+        summary = '按条件筛选全市场；所有条件都可省略',
+        params = {
+            roe_min = { type = 'number', doc = 'ROE 下限（%，年报加权）' },
+            roe_max = { type = 'number', doc = 'ROE 上限' },
+            pe_min = { type = 'number', doc = 'PE(TTM) 下限' },
+            pe_max = { type = 'number', doc = 'PE(TTM) 上限；设置后自动排除亏损股' },
+            pb_max = { type = 'number', doc = 'PB 上限' },
+            ps_max = { type = 'number', doc = 'PS(TTM) 上限' },
+            cap_min = { type = 'number', doc = '总市值下限（亿元）' },
+            cap_max = { type = 'number', doc = '总市值上限（亿元）' },
+            revenue_yoy_min = { type = 'number', doc = '营收同比下限（%）' },
+            np_yoy_min = { type = 'number', doc = '归母净利润同比下限（%）' },
+            gross_margin_min = { type = 'number', doc = '毛利率下限（%）' },
+            ocf_to_eps_min = { type = 'number', doc = '每股经营现金流 / 每股收益 的下限' },
+            industry = { type = 'string', doc = '行业名包含' },
+            keyword = { type = 'string', doc = '名称或代码包含' },
+            boards = { type = 'string', doc = '板块，逗号分隔：main、gem、star、bj' },
+            include_st = { type = 'boolean', doc = '包含 ST（默认排除）' },
+            sort = { type = 'string', doc = '排序字段，默认 roe' },
+            order = { type = 'string', enum = { 'asc', 'desc' }, doc = '默认 desc' },
+            limit = { type = 'integer', doc = '返回条数，默认 50，最多 500' },
+        },
+        handler = function(p)
+            if p.sort and not market_sort_keys[p.sort] then
+                local names = {}
+                for k in pairs(market_sort_keys) do names[#names + 1] = k end
+                table.sort(names)
+                return nil, 'bad_request', 'sort 只能是 ' .. table.concat(names, '、')
+            end
+            if p.limit and (p.limit < 1 or p.limit > 500) then
+                return nil, 'bad_request', 'limit 应在 1 到 500 之间'
+            end
+            local filters = util_copy(p)
+            filters.boards = nil
+            if p.boards then
+                local list = {}
+                for b in tostring(p.boards):gmatch('[^,%s]+') do
+                    if b ~= 'main' and b ~= 'gem' and b ~= 'star' and b ~= 'bj' and b ~= 'other' then
+                        return nil, 'bad_request', 'boards 只能是 main、gem、star、bj'
+                    end
+                    list[#list + 1] = b
+                end
+                filters.boards = list
+            end
+            return market_screen(filters)
+        end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
+    install_market()
     install_watchlist()
     install_stock()
     install_alerts()

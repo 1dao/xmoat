@@ -296,6 +296,21 @@ pre.raw { white-space: pre-wrap; font-size: 12px; background: var(--surface-2); 
 .qa .q { color: var(--ink-2); font-size: 13px; }
 .qa .a { white-space: pre-wrap; margin-top: 2px; }
 
+/* ── screening ───────────────────────────────────────────────────────────── */
+
+.screen-form {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px;
+}
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > span { color: var(--muted); font-size: 12px; }
+/* The board checkboxes and the buttons read as rows, not as another cell in
+   the grid of number inputs. */
+.screen-form .field:has(.checks-row), .field-actions { grid-column: 1 / -1; }
+.field-actions { flex-direction: row; align-items: flex-end; gap: 8px; }
+.checks-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-height: 34px; }
+.check { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); font-size: 13px; }
+.check input { margin: 0; }
+
 /* ── alerts ──────────────────────────────────────────────────────────────── */
 
 .alerts { list-style: none; margin: 0; padding: 0; }
