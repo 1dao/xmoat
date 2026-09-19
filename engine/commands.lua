@@ -318,6 +318,50 @@ local function install_insight()
     })
 end
 
+local function install_backtest()
+    api_define({
+        name = 'backtest.run', method = 'GET', path = '/api/v1/stocks/:code/backtest',
+        summary = '在这只股票自己的历史上回放引擎的信号：方向胜率与止盈止损命中率',
+        params = {
+            code = code_param(),
+            signal = { type = 'string', enum = { 'value', 'trend', 'value_trend', 'band' },
+                       doc = '默认 value（估值分位）' },
+            percentile = { type = 'number', doc = '估值分位阈值，默认 25' },
+            take_profit = { type = 'number', doc = '止盈百分比，默认 20' },
+            stop_loss = { type = 'number', doc = '止损百分比，默认 10' },
+            horizon = { type = 'integer', doc = '止盈止损最多观察多少个交易日，默认 250' },
+            cooldown = { type = 'integer', doc = '两次信号之间至少间隔多少个交易日，默认 20' },
+            offline = { type = 'boolean', doc = '只用本地行情缓存' },
+        },
+        handler = function(p)
+            if p.percentile and (p.percentile <= 0 or p.percentile >= 100) then
+                return nil, 'bad_request', 'percentile 应在 0 到 100 之间'
+            end
+            if p.take_profit and (p.take_profit <= 0 or p.take_profit > 500) then
+                return nil, 'bad_request', 'take_profit 应在 0 到 500 之间'
+            end
+            if p.stop_loss and (p.stop_loss <= 0 or p.stop_loss >= 100) then
+                return nil, 'bad_request', 'stop_loss 应在 0 到 100 之间'
+            end
+            if p.horizon and (p.horizon < 5 or p.horizon > 1000) then
+                return nil, 'bad_request', 'horizon 应在 5 到 1000 之间'
+            end
+            if p.cooldown and (p.cooldown < 1 or p.cooldown > 250) then
+                return nil, 'bad_request', 'cooldown 应在 1 到 250 之间'
+            end
+            local code, err = security_code(p.code)
+            if not code then return nil, 'bad_request', err end
+            local res, ecode, emsg = backtest_run(code, {
+                signal = p.signal, percentile = p.percentile,
+                take_profit = p.take_profit, stop_loss = p.stop_loss,
+                horizon = p.horizon, cooldown = p.cooldown, offline = p.offline,
+            })
+            if not res then return nil, ecode or 'internal', emsg or '回测失败' end
+            return res
+        end,
+    })
+end
+
 local function install_review()
     api_define({
         name = 'review.daily', method = 'GET', path = '/api/v1/review',
@@ -460,6 +504,7 @@ function g_exports.commands_install()
     install_market()
     install_quote()
     install_review()
+    install_backtest()
     install_watchlist()
     install_stock()
     install_alerts()

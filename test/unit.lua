@@ -973,6 +973,89 @@ local function test_quote()
     __net_set_transport(nil)
 end
 
+local function test_backtest()
+    section('backtest')
+    -- 500 days, the multiple falling every day and the price compounding 1% a
+    -- day. Every cheap day is cheaper than the window before it, so the signal
+    -- is true from the moment the 240-day window exists (day 241) onward, and
+    -- the cooldown of 20 turns that into one entry every twenty days:
+    -- 241, 261, ... 481 — thirteen of them.
+    local val, px = {}, {}
+    for i = 1, 500 do
+        local date = util_date_add_days('2023-01-01', i)
+        val[i] = { date = date, close = 100 * 1.01 ^ i, pe_ttm = 501 - i }
+        px[i] = { date = date, close = 100 * 1.01 ^ i,
+                  high = 100 * 1.01 ^ i, low = 100 * 1.01 ^ i }
+    end
+    local found = backtest_signals(val, px, { signal = 'value', metric = 'pe_ttm',
+                                              percentile = 25, cooldown = 20 })
+    eq('the cooldown turns a standing signal into periodic entries', #found.entries, 13)
+    eq('the first is the day the window becomes long enough', found.entries[1].date, val[241].date)
+    eq('days before that are not even tested', found.tested, 260)
+    check('each entry knows the threshold it was judged against',
+        found.entries[1].threshold ~= nil and found.entries[1].threshold > found.entries[1].metric_value)
+
+    -- A rising multiple never reaches its own lower quartile.
+    local rising = {}
+    for i = 1, 500 do rising[i] = { date = val[i].date, close = val[i].close, pe_ttm = i } end
+    eq('a multiple that only rises never fires', #backtest_signals(rising, px,
+        { signal = 'value', metric = 'pe_ttm', percentile = 25 }).entries, 0)
+
+    -- 1.01^20 = 22.02%, every time, so the direction is won every time.
+    local hz = backtest_horizons(found.entries, px, { 20 })
+    eq('an entry without 20 more days of data has no 20-day result', hz[1].n, 12)
+    near('a series that only rises wins every time', hz[1].win_rate, 100, 1e-9)
+    near('and the return is the compounding', hz[1].avg, 22.019, 0.01)
+
+    -- The barriers, on bars built to touch one level or the other.
+    local function bars(second)
+        return { { date = 'd1', close = 100, high = 100, low = 100 }, second }
+    end
+    local entry = { { index = 1, date = 'd1', close = 100 } }
+    local up = backtest_barrier(entry, bars({ date = 'd2', close = 121, high = 121, low = 99 }),
+                                { take_profit = 20, stop_loss = 10 })
+    eq('touching the take profit first is a win', up.hit_tp, 1)
+    near('recorded one day after the entry', up.avg_days_tp, 1, 1e-9)
+    local down = backtest_barrier(entry, bars({ date = 'd2', close = 89, high = 101, low = 89 }),
+                                  { take_profit = 20, stop_loss = 10 })
+    eq('touching the stop first is a loss', down.hit_sl, 1)
+    -- A day that covers both: daily bars cannot say which came first, and the
+    -- flattering assumption is the one that makes every backtest look good.
+    local both = backtest_barrier(entry, bars({ date = 'd2', close = 100, high = 121, low = 89 }),
+                                  { take_profit = 20, stop_loss = 10 })
+    eq('a day that touches both counts as the stop', both.hit_sl, 1)
+    eq('and is counted separately so it can be read', both.both_same_day, 1)
+    local flat = backtest_barrier(entry, bars({ date = 'd2', close = 100, high = 101, low = 99 }),
+                                  { take_profit = 20, stop_loss = 10 })
+    eq('reaching neither within the horizon is neither', flat.neither, 1)
+    eq('and leaves the hit rate to the decided ones', flat.win_rate, nil)
+
+    -- The whole thing, with its baseline.
+    local res = backtest_evaluate(val, px, { signal = 'value', metric = 'pe_ttm',
+                                             percentile = 25, cooldown = 20,
+                                             horizons = { 20 }, take_profit = 20, stop_loss = 10 })
+    eq('the result counts its entries', res.entries, 13)
+    check('and compares them with buying on any day of the same window',
+        res.baseline and res.baseline.horizons[1].n > res.horizons[1].n)
+    near('which on this series also wins every time', res.baseline.horizons[1].win_rate, 100, 1e-9)
+
+    -- A signal that never fires says so instead of returning empty statistics.
+    local none = backtest_evaluate(rising, px, { signal = 'value', metric = 'pe_ttm' })
+    check('a signal that never fired is reported as such', none.note ~= nil and none.entries == 0)
+
+    -- 多头排列 on prices alone, no valuation window needed.
+    local trend = backtest_signals(val, px, { signal = 'trend', cooldown = 60 })
+    check('a rising series is in bull order once the averages exist', #trend.entries > 0)
+    eq('and the first is after MA60 exists', trend.entries[1].index >= 60, true)
+
+    __net_set_transport(fixture_transport)
+    eq('a stock with too little valuation history is refused',
+        api_call('backtest.run', { code = '600519' }).error.code, 'bad_request')
+    eq('and a nonsensical stop is refused before any work',
+        api_call('backtest.run', { code = '600519', stop_loss = 0 }).error.code, 'bad_request')
+    __net_set_transport(nil)
+end
+
 local function test_review()
     section('daily review')
     local sect = source_em_parse_sectors(fixture('em_sectors.json'))
@@ -1446,6 +1529,7 @@ local function run_all()
     test_tech()
     test_levels()
     test_review()
+    test_backtest()
 end
 
 return {

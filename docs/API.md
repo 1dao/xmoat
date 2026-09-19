@@ -63,6 +63,7 @@
 | `stock.reports` | `GET /api/v1/stocks/:code/reports` | `period_type?`，`limit?` | 定期报告主要指标（原始口径） |
 | `quote.get` | `GET /api/v1/stocks/:code/quotes` | `days?`（默认 250），`offline?` | `Quotes`；本地缓存够新就直接返回 |
 | `quote.refresh` | `POST /api/v1/stocks/:code/quotes/refresh` | `full?` | `Quotes`（不含 rows）；已有缓存时只抓最后一天之后的部分 |
+| `backtest.run` | `GET /api/v1/stocks/:code/backtest` | `signal?`，`percentile?`，`take_profit?`，`stop_loss?`，`horizon?`，`cooldown?`，`offline?` | `Backtest`：方向胜率、止盈止损命中率，以及同窗口的基准 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
@@ -294,6 +295,46 @@ type Check = {
   status: 'pass' | 'warn' | 'na',           // na = 数据不足，不等于通过
   detail: string,                           // 带数字和报告期的一句话
   value?: number, values?: object, threshold?: number, period?: string,
+}
+```
+
+### Backtest
+
+口径见 [METRICS.md](METRICS.md#回测验证)。回放的是引擎自己的规则信号，不是模型的话；
+每个信号在每一天只用当天之前的数据判断。`baseline` 是同一段窗口里「随便哪天买」的同样统计，
+客户端必须把它和信号的数字并排显示——单独一个胜率是读不出意思的。
+
+```ts
+type Backtest = {
+  code: string, name?: string, template: Template,
+  signal: 'value' | 'trend' | 'value_trend' | 'band',
+  signal_note: string,
+  metric?: string, percentile?: number,
+  entries: number,                          // 触发次数
+  tested: number,                           // 可判定的交易日数
+  cooldown: number,                         // 两次信号之间的最小间隔（交易日）
+  from?: string, to?: string,               // 第一次与最后一次触发
+  price_from?: string, price_to?: string,   // 行情缓存覆盖的区间
+  horizons: Horizon[],
+  barrier: Barrier,
+  baseline: { n: number, from?: string, horizons: Horizon[], barrier: Barrier },
+  dates: { date: string, close?: number, value?: number, threshold?: number }[],  // 最近 20 次
+  notes: string[],
+  note?: string,                            // 一次都没触发时的说明，此时统计缺席
+}
+
+type Horizon = {
+  days: number, n: number,                  // n 是有足够后续数据的次数
+  win_rate?: number, avg?: number, median?: number, best?: number, worst?: number,   // 均为 %
+}
+
+type Barrier = {
+  take_profit: number, stop_loss: number, horizon: number,   // %，%，交易日
+  n: number, hit_tp: number, hit_sl: number, neither: number,
+  both_same_day: number,                    // 同一天两边都触及，按止损计
+  win_rate?: number,                        // hit_tp / (hit_tp + hit_sl)
+  tp_rate?: number, sl_rate?: number,       // 占全部信号的比例
+  avg_days_tp?: number, avg_days_sl?: number,
 }
 ```
 

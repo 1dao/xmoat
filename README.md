@@ -288,6 +288,7 @@ xmoat/
     schedule.lua         定时检查
     market.lua           全市场快照与筛选
     review.lua           当日复盘三段：大盘与 regime、板块结构、自选
+    backtest.lua         在自己的历史上回放信号：方向胜率、止盈止损命中率
     llm.lua              一次模型调用：Claude 原生接口或 OpenAI 兼容接口
     insight.lua          事实进、经过核对的解读出；问答
     api.lua  commands.lua  engine.lua 命令注册表、全部命令、启动与停止

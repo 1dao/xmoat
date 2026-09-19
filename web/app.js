@@ -317,6 +317,7 @@
       businessCard(a),
       dividendCard(a),
       checksCard(a),
+      backtestCard(a),
       insightCard(a, token),
       recentAlertsCard(a.code, token),
       sourcesLine(a));
@@ -719,6 +720,82 @@
           h('td', { class: 'r num', text: fmtPct(s.gross_margin) })))))));
     }
     if (b.scope) card.append(h('p', { class: 'muted small', text: '经营范围：' + b.scope }));
+    return card;
+  }
+
+  // ── backtest ───────────────────────────────────────────────────────────────
+
+  const SIGNAL_LABEL = {
+    value: '估值分位偏低',
+    trend: '均线多头排列',
+    value_trend: '低估值 + 多头排列',
+    band: '低于我设的区间下沿',
+  };
+
+  function backtestTables(r) {
+    const box = h('div');
+    if (r.note) { box.append(h('p', { class: 'muted', text: r.note })); return box; }
+    box.append(h('p', { class: 'muted small', text:
+      `${r.from} – ${r.to}　触发 ${r.entries} 次（可判定的交易日 ${r.tested} 个，两次信号至少间隔 ${r.cooldown} 个交易日）` }));
+
+    const base = {};
+    for (const b of (r.baseline || {}).horizons || []) base[b.days] = b;
+    box.append(h('div', { class: 'label-sm', text: '方向胜率' }));
+    box.append(h('div', { class: 'table-wrap mb' }, h('table', {},
+      h('thead', {}, h('tr', {},
+        h('th', { text: '持有' }), h('th', { class: 'r', text: '次数' }),
+        h('th', { class: 'r', text: '胜率' }), h('th', { class: 'r', text: '基准胜率' }),
+        h('th', { class: 'r', text: '平均收益' }), h('th', { class: 'r', text: '基准平均' }),
+        h('th', { class: 'r', text: '最好' }), h('th', { class: 'r', text: '最差' }))),
+      h('tbody', {}, (r.horizons || []).map(hz => {
+        const b = base[hz.days] || {};
+        return h('tr', {},
+          h('td', { text: hz.days + ' 日' }),
+          h('td', { class: 'r num', text: String(hz.n || 0) }),
+          h('td', { class: 'r num', text: fmtPct(hz.win_rate, 0) }),
+          h('td', { class: 'r num muted', text: fmtPct(b.win_rate, 0) }),
+          h('td', { class: 'r num', text: fmtPct(hz.avg, 1) }),
+          h('td', { class: 'r num muted', text: fmtPct(b.avg, 1) }),
+          h('td', { class: 'r num', text: fmtPct(hz.best, 1) }),
+          h('td', { class: 'r num', text: fmtPct(hz.worst, 1) }));
+      })))));
+
+    const br = r.barrier || {}, bb = (r.baseline || {}).barrier || {};
+    box.append(h('div', { class: 'label-sm', text:
+      `止盈止损（止盈 ${fmtPct(br.take_profit, 0)}，止损 ${fmtPct(br.stop_loss, 0)}，最多 ${br.horizon} 个交易日）` }));
+    const brow = (k, a, b) => h('tr', {}, h('td', { text: k }),
+      h('td', { class: 'r num', text: a }), h('td', { class: 'r num muted', text: b }));
+    box.append(h('div', { class: 'table-wrap mb' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', { text: '' }),
+        h('th', { class: 'r', text: '信号' }), h('th', { class: 'r', text: '基准' }))),
+      h('tbody', {},
+        brow('先到止盈', `${br.hit_tp || 0}（${fmtPct(br.tp_rate, 0)}）`, `${bb.hit_tp || 0}（${fmtPct(bb.tp_rate, 0)}）`),
+        brow('先到止损', `${br.hit_sl || 0}（${fmtPct(br.sl_rate, 0)}）`, `${bb.hit_sl || 0}（${fmtPct(bb.sl_rate, 0)}）`),
+        brow('都没到', String(br.neither || 0), String(bb.neither || 0)),
+        brow('止盈命中率', fmtPct(br.win_rate, 0), fmtPct(bb.win_rate, 0))))));
+    if (br.both_same_day) {
+      box.append(h('p', { class: 'muted small', text:
+        `其中 ${br.both_same_day} 次在同一天既触及止盈也触及止损，按止损计：日线看不出谁先到，算成赢是那种让回测都好看的假设。` }));
+    }
+    for (const n of r.notes || []) box.append(h('p', { class: 'muted small', text: n }));
+    return box;
+  }
+
+  function backtestCard(a) {
+    const card = h('section', { class: 'card' });
+    const select = h('select', { 'aria-label': '信号' },
+      Object.keys(SIGNAL_LABEL).map(k => h('option', { value: k, text: SIGNAL_LABEL[k] })));
+    const run = h('button', { class: 'btn', text: '运行回测' });
+    const body = h('div');
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '回测验证' }),
+      h('span', { class: 'spacer' }), select, run), body);
+    body.append(h('p', { class: 'muted', text: '在这只股票自己的历史上回放信号，看当时买入之后发生了什么。旁边一列是同一段时间里「随便哪天买」的同样统计——信号没有明显好过它，就说明这条规则没有加东西。' }));
+
+    run.addEventListener('click', () => busy(run, '回放中…', async () => {
+      const r = await api('GET', `/api/v1/stocks/${enc(a.code)}/backtest?signal=${enc(select.value)}`);
+      body.textContent = '';
+      body.append(h('p', { class: 'muted small', text: r.signal_note || '' }), backtestTables(r));
+    }));
     return card;
   }
 

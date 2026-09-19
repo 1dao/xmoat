@@ -1,7 +1,8 @@
 -- engine/report.lua — the analysis object as Markdown text.
 --
 -- Exports: report_markdown, report_money, report_pct,
---          report_events_markdown, report_events_text
+--          report_events_markdown, report_events_text,
+--          report_review_markdown, report_backtest_markdown
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -258,6 +259,68 @@ end
 -- text for Feishu and Telegram, whose Markdown dialects reject characters that
 -- company names and dividend plans routinely contain.
 -- ---------------------------------------------------------------------------
+
+-- A backtest result as Markdown. The baseline sits in the same table as the
+-- signal, column by column, because the two numbers only mean something next
+-- to each other.
+function g_exports.report_backtest_markdown(r)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+
+    f('# 回测 %s %s', r.code or '', r.name or '')
+    line()
+    f('信号：%s', r.signal_note or r.signal or '')
+    if r.note then
+        line()
+        f('- %s', r.note)
+        return table.concat(L, '\n')
+    end
+    f('区间：%s – %s，行情 %s – %s；触发 %d 次（可判定的交易日 %d 个，两次信号至少间隔 %d 个交易日）',
+        r.from or '—', r.to or '—', r.price_from or '—', r.price_to or '—',
+        r.entries or 0, r.tested or 0, r.cooldown or 0)
+    line()
+
+    line('## 方向胜率')
+    line()
+    line('| 持有 | 次数 | 胜率 | 基准胜率 | 平均收益 | 基准平均 | 中位数 | 最好 | 最差 |')
+    line('|---|---|---|---|---|---|---|---|---|')
+    local base = {}
+    for _, b in ipairs((r.baseline or {}).horizons or {}) do base[b.days] = b end
+    for _, hz in ipairs(r.horizons or {}) do
+        local b = base[hz.days] or {}
+        f('| %d 日 | %d | %s | %s | %s | %s | %s | %s | %s |', hz.days, hz.n or 0,
+            report_pct(hz.win_rate, 0), report_pct(b.win_rate, 0),
+            report_pct(hz.avg, 1), report_pct(b.avg, 1), report_pct(hz.median, 1),
+            report_pct(hz.best, 1), report_pct(hz.worst, 1))
+    end
+    line()
+
+    local br = r.barrier or {}
+    local bb = (r.baseline or {}).barrier or {}
+    f('## 止盈止损（止盈 %s，止损 %s，最多观察 %d 个交易日）',
+        report_pct(br.take_profit, 0), report_pct(br.stop_loss, 0), br.horizon or 0)
+    line()
+    line('| | 信号 | 基准 |')
+    line('|---|---|---|')
+    f('| 先到止盈 | %d（%s） | %d（%s） |', br.hit_tp or 0, report_pct(br.tp_rate, 0),
+        bb.hit_tp or 0, report_pct(bb.tp_rate, 0))
+    f('| 先到止损 | %d（%s） | %d（%s） |', br.hit_sl or 0, report_pct(br.sl_rate, 0),
+        bb.hit_sl or 0, report_pct(bb.sl_rate, 0))
+    f('| 都没到 | %d | %d |', br.neither or 0, bb.neither or 0)
+    f('| 止盈命中率 | %s | %s |', report_pct(br.win_rate, 0), report_pct(bb.win_rate, 0))
+    f('| 平均到达天数 | 止盈 %s / 止损 %s | 止盈 %s / 止损 %s |',
+        num(br.avg_days_tp, 0), num(br.avg_days_sl, 0), num(bb.avg_days_tp, 0), num(bb.avg_days_sl, 0))
+    line()
+    if (br.both_same_day or 0) > 0 then
+        f('> 其中 %d 次在同一天既触及止盈也触及止损，按止损计：日线看不出谁先到，' ..
+          '算成赢是那种让回测都好看的假设。', br.both_same_day)
+        line()
+    end
+    for _, n in ipairs(r.notes or {}) do f('> %s', n) end
+    line()
+    return table.concat(L, '\n')
+end
 
 local REGIME = { bull = '多头（指数在上升的长期均线之上）', bear = '空头（指数在下降的长期均线之下）',
                  range = '震荡（指数与长期均线方向不一致）', unknown = '未知' }
