@@ -84,6 +84,32 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   the AES key are the credential — and it drops every event it receives. The
   vector in `test/unit.lua` is Tencent's own WXBizMsgCrypt sample.
 
+## Prices, technicals, levels, backtest
+
+- `engine/quote.lua` caches daily bars per security (`data/quotes/<code>.json`,
+  `idx-<code>.json` for an index — 000001 is both the Shanghai Composite and
+  平安银行). A refresh asks only for the days after the last one kept, with ten
+  days of overlap: the series is FORWARD-ADJUSTED, so a dividend rewrites all
+  of it, and a disagreeing close in the overlap means refetch everything
+  rather than splice two bases together. `QUOTE_MAX_DAYS` (1200) caps it.
+- `engine/tech.lua` and `engine/levels.lua` are pure. Levels turn a multiple
+  into a price (`close × m ÷ today's multiple`) and take the nearest support
+  below the price for the stop; every output carries the rule that made it,
+  and the notes say what invalidates it. Do not add a number here without one.
+- The chip distribution is a MODEL (turnover-decay, triangular within the
+  day's range). Its assumptions are in docs/METRICS.md; an index has no
+  turnover, so it has no chips.
+- `engine/backtest.lua` replays those rules. The percentile on day t uses only
+  days before t, and today's value joins the window after the comparison. Keep
+  it that way: a lookahead here would make every number meaningless. A day
+  touching both barriers counts as the stop, and the baseline (buying on any
+  day of the same window) is part of the result, not a nicety.
+- `engine/review.lua` is the daily review: indices from the quote cache, the
+  board table from the quote server (100 rows per page, so it is paged; the
+  live host 502s from some networks and the delayed one is the fallback), and
+  the watchlist out of what is already stored. Breadth counts BOARDS — the
+  fine industry boards overlap, so summing their stock counts double-counts.
+
 ## Screening
 
 - `engine/market.lua` keeps its own snapshot (`data/market.json`): two
