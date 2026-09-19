@@ -232,6 +232,15 @@ local function dcf_params()
     }
 end
 
+local function level_params()
+    return {
+        buy_pctl = cfg_num('LEVEL_BUY_PCTL', 25),
+        buy_low_pctl = cfg_num('LEVEL_BUY_LOW_PCTL', 10),
+        target_pctl = cfg_num('LEVEL_TARGET_PCTL', 70),
+        stop_buffer = cfg_num('LEVEL_STOP_BUFFER', 3),
+    }
+end
+
 -- Options for events_diff, from config.
 function g_exports.stock_event_opts()
     return {
@@ -249,7 +258,8 @@ function g_exports.stock_analysis(code)
     -- Prices come from the cache only: stock.get is documented as not going
     -- to the network, and a refresh is what fills it.
     return analysis_build(rec, watch_get(code),
-        { dcf = dcf_params(), quotes = quote_series(code, { offline = true }) })
+        { dcf = dcf_params(), levels = level_params(),
+          quotes = quote_series(code, { offline = true }) })
 end
 
 -- The compact line a watchlist row shows. Built from the full analysis so the

@@ -99,6 +99,42 @@ function g_exports.report_markdown(a)
         line()
     end
 
+    local lv = a.levels
+    if lv and not lv.note then
+        f('## 点位（按规则计算，不是建议）')
+        line()
+        f('锚：%s，当前 %s，全历史 %s 个交易日（%s 起），中位数 %s', lv.metric_label,
+            num(lv.metric_now), lv.window and lv.window.n or '—',
+            lv.window and lv.window.from or '—', num(lv.window and lv.window.median))
+        line()
+        if lv.buy and lv.buy.high then
+            if lv.buy.low then
+                f('- 买入区间：%s – %s（%s）', num(lv.buy.low), num(lv.buy.high), lv.buy.basis or '')
+            else
+                f('- 买入价：%s 以下（%s）', num(lv.buy.high), lv.buy.basis or '')
+            end
+        end
+        if lv.target then
+            f('- 目标价：%s，较现价 %s（%s）', num(lv.target.price), report_pct(lv.target.upside, 1),
+                lv.target.basis or '')
+        end
+        if lv.stop then
+            f('- 止损价：%s，较现价 %s（%s）', num(lv.stop.price), report_pct(lv.stop.downside, 1),
+                lv.stop.basis or '')
+        end
+        if lv.reward_risk then
+            f('- 盈亏比：%s（到目标价的空间 / 到止损价的空间）', num(lv.reward_risk, 2))
+        end
+        line()
+        for _, n in ipairs(lv.notes or {}) do f('> %s', n) end
+        line()
+    elseif lv and lv.note then
+        line('## 点位')
+        line()
+        f('- 算不出来：%s', lv.note)
+        line()
+    end
+
     local t = a.technical
     if t then
         f('## 技术面（%s 收盘 %s）', t.as_of or '—', num(t.close))

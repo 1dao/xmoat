@@ -133,6 +133,7 @@ type Analysis = {
   quality: Quality,
   business?: Business,
   technical?: Technical,                     // 有日线缓存时才有；没有缓存就整块缺席
+  levels: Levels,                           // 规则算出的买入/止损/目标；算不出时只有 note
   dividends: Dividends,
   checks: Check[],
   watch?: { note?: string, added_at: string, band?: Band },   // 不在自选中则缺失
@@ -175,6 +176,35 @@ type Valuation = {
 type Percentile = { percentile: number, n: number, from: string, to: string, min: number, median: number, max: number }
 
 type BandResult = { metric: string, low?: number, high?: number, value: number, position: 'below' | 'inside' | 'above' }
+```
+
+### Levels
+
+口径见 [METRICS.md](METRICS.md#点位买入--止损--目标)。**这些不是建议**，是两个锚点的算术：
+估值锚（这只股票自己的历史分位，或你设的合理区间）和技术锚（现价下方最近的支撑）。
+客户端应当把 `basis` 和 `notes` 一起显示——脱离依据的价格没有意义。
+
+```ts
+type Levels = {
+  metric: 'pe_ttm' | 'pb' | 'ps_ttm' | 'pcf_ttm',
+  metric_label: string, metric_now: number,
+  date: string, close: number,
+  source: 'band' | 'history',               // 锚是你设的区间，还是历史分位
+  window: { from: string, to: string, n: number, percentile: number, median: number },
+  buy?: {
+    low?: number, high: number,             // low 缺席表示「high 以下」
+    metric_low?: number, metric_high: number,
+    basis: string,
+  },
+  target?: { price: number, metric_value: number, upside: number, basis: string },
+  stop?: {
+    price: number, support: number, support_label: string,
+    buffer: number, downside: number, basis: string,
+  },
+  reward_risk?: number,                     // (目标 − 现价) / (现价 − 止损)
+  notes: string[],
+  note?: string,                            // 整块算不出时的原因，此时其余字段缺席
+}
 ```
 
 ### Technical

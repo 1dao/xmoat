@@ -848,6 +848,64 @@ local function test_tech()
     near('and its distance from the high is signed', rb.range_60.from_high, -24.8, 0.5)
 end
 
+local function test_levels()
+    section('levels')
+    -- 400 days at PE 10..49 with a matching price, so the quantiles are known:
+    -- sorted, the 10th percentile of 400 points sits at index 40.9.
+    local rows = {}
+    for i = 1, 400 do
+        local pe = 10 + (i - 1) * 0.1
+        rows[i] = { date = util_date_add_days('2024-01-01', i), close = pe * 2, pe_ttm = pe, pb = pe / 5 }
+    end
+    -- The last day is PE 49.9 and close 99.8.
+    near('a quantile interpolates between neighbours', valuation_quantile(rows, 'pe_ttm', 10), 13.99, 0.02)
+    near('the median is the middle', valuation_quantile(rows, 'pe_ttm', 50), 29.95, 0.02)
+
+    local lv = levels_build(rows, { template = 'general' })
+    eq('earnings are the default anchor', lv.metric, 'pe_ttm')
+    -- price at multiple m = close * m / now = 99.8 * 13.99 / 49.9.
+    near('the buy floor is the price at the 10% percentile', lv.buy.low, 27.98, 0.05)
+    near('and its top the price at the 25% percentile', lv.buy.high, 39.95, 0.1)
+    -- The 70th of 400 points is index 280.3, PE 37.93: 99.8 * 37.93 / 49.9.
+    near('the target is the price at the 70% percentile', lv.target.price, 75.86, 0.05)
+    near('with the upside measured from the close', lv.target.upside, -23.99, 0.05)
+    eq('no daily bars, no stop', lv.stop, nil)
+
+    -- A bank is read on book value instead.
+    eq('a bank anchors on PB', levels_build(rows, { template = 'bank' }).metric, 'pb')
+    -- A band the user set wins over both.
+    local banded = levels_build(rows, { template = 'general',
+                                        band = { metric = 'pe_ttm', low = 20, high = 40 } })
+    eq('a band takes over the anchor', banded.source, 'band')
+    near('buying starts at the band low', banded.buy.high, 40, 0.05)
+    near('and the target is its high', banded.target.price, 80, 0.05)
+    check('the band low is above the 10% percentile, so the range keeps a floor',
+        banded.buy.low ~= nil)
+
+    -- The stop is the nearest support below the price, minus the buffer.
+    local tech = { ma = { ['250'] = 80, ['120'] = 95, ['60'] = 105 },
+                   chips = { low_90 = 70 }, range_250 = { low = 60 } }
+    local stopped = levels_build(rows, { template = 'general', technical = tech, stop_buffer = 3 })
+    eq('MA60 is above the close, so MA120 is the nearest support', stopped.stop.support_label, 'MA120')
+    near('and the stop sits 3% under it', stopped.stop.price, 92.15, 0.01)
+    near('the loss to it is measured from the close', stopped.stop.downside, -7.67, 0.05)
+    near('the reward-to-risk ratio compares the two distances', stopped.reward_risk,
+        (stopped.target.price - 99.8) / (99.8 - stopped.stop.price), 1e-6)
+
+    -- Below everything: only the year's low is left.
+    local low_tech = { ma = { ['250'] = 200 }, chips = { low_90 = 150 }, range_250 = { low = 120 } }
+    local floored = levels_build(rows, { template = 'general', technical = low_tech })
+    eq('with no support under the price the year low is used', floored.stop.support_label, '近 250 日最低')
+
+    -- A loss-making company has no PE to come back to, and says so.
+    local losses = {}
+    for i = 1, 400 do losses[i] = { date = rows[i].date, close = 10, pe_ttm = -5 } end
+    local none, why = levels_build(losses, { template = 'general' })
+    check('a negative anchor is refused with a reason', none == nil and why ~= nil, why)
+    eq('and too short a history too',
+        (levels_build({ { date = '2026-01-01', close = 10, pe_ttm = 10 } }, {})), nil)
+end
+
 local function test_quote()
     section('daily prices')
     local k = source_em_parse_kline(fixture('em_kline_600519.json'))
@@ -1325,6 +1383,7 @@ local function run_all()
     test_market()
     test_quote()
     test_tech()
+    test_levels()
 end
 
 return {

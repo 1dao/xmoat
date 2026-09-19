@@ -309,6 +309,7 @@
       (a.notes || []).map(n => h('p', { class: 'note', text: n })),
       valuationCard(a),
       chartCard(a, token),
+      levelsCard(a),
       technicalCard(a),
       qualityCard(a),
       businessCard(a),
@@ -599,6 +600,49 @@
         h('div', { class: 'detail', text: c.detail || '' })));
     }
     card.append(list, h('p', { class: 'muted small', text: '阈值是经验规则，不是结论：提示意味着值得打开年报看一看。' }));
+    return card;
+  }
+
+  // ── levels ─────────────────────────────────────────────────────────────────
+
+  function levelsCard(a) {
+    const lv = a.levels;
+    if (!lv) return null;
+    const card = h('section', { class: 'card' });
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '点位' }),
+      h('span', { class: 'muted', text: lv.note ? '' : `锚：${lv.metric_label} ${fmtNum(lv.metric_now)}` })));
+    if (lv.note) {
+      card.append(h('p', { class: 'muted', text: '算不出来：' + lv.note }));
+      return card;
+    }
+
+    const kv = h('dl', { class: 'kv' });
+    const row = (k, v) => { if (v) kv.append(h('dt', { text: k }), h('dd', {}, v)); };
+    const withBasis = (main, basis) => h('span', {},
+      h('span', { class: 'num', text: main }),
+      h('span', { class: 'muted small', text: '　' + basis }));
+
+    if (lv.buy && isNum(lv.buy.high)) {
+      const main = isNum(lv.buy.low)
+        ? `${fmtNum(lv.buy.low)} – ${fmtNum(lv.buy.high)}`
+        : `${fmtNum(lv.buy.high)} 以下`;
+      row('买入', withBasis(main, lv.buy.basis || ''));
+    }
+    if (lv.target) {
+      row('目标', withBasis(`${fmtNum(lv.target.price)}（${fmtPct(lv.target.upside, 1)}）`, lv.target.basis || ''));
+    }
+    if (lv.stop) {
+      row('止损', withBasis(`${fmtNum(lv.stop.price)}（${fmtPct(lv.stop.downside, 1)}）`, lv.stop.basis || ''));
+    }
+    if (isNum(lv.reward_risk)) {
+      row('盈亏比', h('span', { class: 'num', text: fmtNum(lv.reward_risk, 2) }));
+    }
+    const w = lv.window;
+    if (w) {
+      row('样本', h('span', { class: 'muted', text: `${w.from} 起 ${w.n} 个交易日，中位数 ${fmtNum(w.median)}，当前分位 ${fmtPct(w.percentile, 0)}` }));
+    }
+    card.append(kv);
+    for (const n of lv.notes || []) card.append(h('p', { class: 'muted small', text: n }));
     return card;
   }
 

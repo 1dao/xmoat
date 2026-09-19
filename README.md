@@ -276,6 +276,7 @@ xmoat/
     quality.lua          经营质量序列与汇总，按模板
     checks.lua           检查清单与阈值
     tech.lua             技术面：均线、乖离率、位置、量能、筹码分布
+    levels.lua           买入区间、止损价、目标价：估值锚 + 支撑锚
     analysis.lua         分析对象：所有客户端展示的那一个结构
     store.lua  watch.lua  stock.lua   存储、自选、抓取与增量合并
     quote.lua            日线行情本地缓存：只补最后一天之后的部分

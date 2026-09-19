@@ -1,6 +1,6 @@
 -- engine/valuation.lua — how expensive a stock is, against its own history.
 --
--- Exports: valuation_latest, valuation_percentile, valuation_metrics,
+-- Exports: valuation_latest, valuation_percentile, valuation_quantile, valuation_metrics,
 --          valuation_reverse_dcf, valuation_band, valuation_band_metrics
 --
 -- Pure functions over the daily rows a source produces (oldest first):
@@ -68,6 +68,33 @@ function g_exports.valuation_percentile(rows, field, since)
         n = #vals, from = from, to = latest.date,
         min = fin_min(vals), median = fin_median(vals), max = fin_max(vals),
     }
+end
+
+-- The value of `field` at percentile `p` (0-100) of its own history: the
+-- inverse of valuation_percentile, and the reason engine/levels.lua can turn
+-- "the 25th percentile" into a price. Same window and same filtering, so the
+-- two always speak about the same sample. Returns the value or nil plus a
+-- reason.
+function g_exports.valuation_quantile(rows, field, p, since)
+    local latest = valuation_latest(rows)
+    if not latest then return nil, '没有估值数据' end
+    local vals = {}
+    for _, r in ipairs(rows) do
+        local v = util_num(r[field])
+        if v and v > 0 and (not since or r.date >= since) and r.date <= latest.date then
+            vals[#vals + 1] = v
+        end
+    end
+    if #vals < MIN_POINTS then
+        return nil, string.format('样本只有 %d 个交易日，不足 %d 个', #vals, MIN_POINTS)
+    end
+    table.sort(vals)
+    -- Linear interpolation between the two neighbouring points, so a
+    -- percentile between samples does not jump.
+    local pos = math.max(0, math.min(100, p)) / 100 * (#vals - 1) + 1
+    local lo = math.floor(pos)
+    local hi = math.min(#vals, lo + 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
 end
 
 -- Every metric, each over the whole history and over the last five years.

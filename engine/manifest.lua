@@ -19,6 +19,7 @@ return {
     'engine/quality.lua',    -- quality_*
     'engine/checks.lua',     -- checks_*    the checklist
     'engine/tech.lua',       -- tech_*      moving averages, bias, chip distribution
+    'engine/levels.lua',     -- levels_*    a buy range, a stop and a target
     'engine/analysis.lua',   -- analysis_*  the object every client renders
     'engine/report.lua',     -- report_*    Markdown, for the CLI and push channels
     'engine/events.lua',     -- events_*    what changed between two refreshes

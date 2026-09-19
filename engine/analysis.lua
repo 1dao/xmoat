@@ -204,7 +204,8 @@ end
 -- data:  the stored stock record (engine/stock.lua)
 -- watch: the watchlist entry, or nil
 -- opts:  { dcf = { discount_rate, terminal_growth, years },
---          quotes = the cached daily bars (engine/quote.lua), or nil }
+--          quotes = the cached daily bars (engine/quote.lua), or nil,
+--          levels = { buy_pctl, buy_low_pctl, target_pctl, stop_buffer } }
 function g_exports.analysis_build(data, watch, opts)
     opts = opts or {}
     local template = data.org_type or 'general'
@@ -213,6 +214,15 @@ function g_exports.analysis_build(data, watch, opts)
     local notes = {}
     if TEMPLATE_NOTES[template] then notes[#notes + 1] = TEMPLATE_NOTES[template] end
     if not latest then notes[#notes + 1] = '没有取到定期报告数据。' end
+
+    -- The technical block first: the levels below read its support lines.
+    local technical = build_technical(opts.quotes)
+    local lv = opts.levels or {}
+    local levels, lerr = levels_build(data.valuation or {}, {
+        template = template, band = watch and watch.band or nil, technical = technical,
+        buy_pctl = lv.buy_pctl, buy_low_pctl = lv.buy_low_pctl,
+        target_pctl = lv.target_pctl, stop_buffer = lv.stop_buffer,
+    })
 
     local out = {
         schema = analysis_schema,
@@ -231,7 +241,10 @@ function g_exports.analysis_build(data, watch, opts)
         -- Prices are cached separately from the reports and are allowed to be
         -- missing: a stock refreshed before there was a price cache still has
         -- every other section.
-        technical = build_technical(opts.quotes),
+        technical = technical,
+        -- Rule-derived prices, and a reason instead when the anchor multiple
+        -- does not exist (a loss-making company has no PE to come back to).
+        levels = levels or { note = lerr },
         -- Copied: round_floats works in place, and these belong to the store.
         watch = watch and { note = watch.note, added_at = watch.added_at,
                             band = watch.band and util_copy(watch.band) or nil } or nil,
