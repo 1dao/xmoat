@@ -26,7 +26,8 @@ local ERROR_STATUS = {
     bad_request = 400,    -- the caller sent something invalid
     not_found   = 404,    -- no such command, stock or watchlist entry
     not_fetched = 404,    -- the stock exists but has never been refreshed
-    conflict    = 409,    -- already exists
+    conflict    = 409,    -- already exists, or already running
+    unavailable = 503,    -- a feature that needs configuration it does not have
     upstream    = 502,    -- a data source failed or answered nonsense
     internal    = 500,    -- a bug, or the disk
 }

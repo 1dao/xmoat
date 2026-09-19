@@ -40,7 +40,7 @@ local function fmt_unit(v, unit, digits)
 end
 
 local STATUS = { pass = '✅', warn = '⚠️', na = '➖' }
-local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉', check = '🔎' }
+local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉', check = '🔎', insight = '🧠' }
 local POSITION = { below = '低于', inside = '位于', above = '高于' }
 local METRIC_LABEL = { pe_ttm = 'PE(TTM)', pb = 'PB', ps_ttm = 'PS(TTM)', pcf_ttm = 'PCF(TTM)' }
 
@@ -114,6 +114,26 @@ function g_exports.report_markdown(a)
             local row = { '| ' .. s.label .. ' ' }
             for i = k, #q.periods do row[#row + 1] = '| ' .. fmt_unit(s.values[i], s.unit, s.digits) .. ' ' end
             line(table.concat(row) .. '|')
+        end
+        line()
+    end
+
+    local b = a.business
+    if b and b.period then
+        f('## 主营构成（%s 年报）', b.period)
+        line()
+        local names = { product = '产品', region = '地区', industry = '行业' }
+        for _, kind in ipairs({ 'product', 'region' }) do
+            local list = b.by and b.by[kind] or {}
+            if #list > 0 then
+                local items = {}
+                for _, s in ipairs(list) do
+                    local change = has(s.share_change) and string.format('，%+.1fpt', s.share_change) or ''
+                    items[#items + 1] = string.format('%s %s%s（毛利率 %s）', s.name, report_pct(s.revenue_share),
+                        change, report_pct(s.gross_margin))
+                end
+                f('- 按%s：%s', names[kind], table.concat(items, '；'))
+            end
         end
         line()
     end

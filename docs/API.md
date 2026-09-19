@@ -33,6 +33,7 @@
 | `not_fetched` | 404 | 代码有效，但还没刷新过；调用 `stock.refresh` |
 | `conflict` | 409 | 已经在自选中 |
 | `upstream` | 502 | 数据源失败或返回了无法解析的内容 |
+| `unavailable` | 503 | 这个功能需要配置才能用（例如没有配置大模型） |
 | `internal` | 500 | 程序错误或磁盘错误，详情在日志里 |
 | `unauthorized` | 401 | 仅 HTTP：设置了 `API_TOKEN` 但请求没带或带错 |
 
@@ -64,6 +65,10 @@
 | `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
 | `notify.test` | `POST /api/v1/notify/test` | — | `PushResult[]`；没有配置渠道时为 `bad_request` |
 | `schedule.status` | `GET /api/v1/schedule` | — | `ScheduleStatus` |
+| `llm.status` | `GET /api/v1/llm` | — | `{enabled, provider?, model?, hint?}`，不含密钥 |
+| `insight.get` | `GET /api/v1/stocks/:code/insight` | — | `Insight`（已保存的，不联网）；没有则 `not_found` |
+| `insight.generate` | `POST /api/v1/stocks/:code/insight` | — | `Insight`（调用大模型，会产生费用） |
+| `insight.ask` | `POST /api/v1/stocks/:code/ask` | `question`（≤500 字），`history?` | `{answer, unverified, provider, model, usage}` |
 
 **提醒是怎么产生的。** 每次刷新一只自选股（手动、`watchlist.refresh`、`alerts.run` 或定时检查），
 引擎都会比较刷新前后的数据并记录变化；`stock.refresh` 和 `watchlist.refresh` 在返回后于后台推送，
@@ -115,6 +120,7 @@ type Analysis = {
   latest_report?: LatestReport,
   valuation?: Valuation,
   quality: Quality,
+  business?: Business,
   dividends: Dividends,
   checks: Check[],
   watch?: { note?: string, added_at: string, band?: Band },   // 不在自选中则缺失
@@ -167,6 +173,26 @@ type Quality = {
 }
 // digits：展示时建议保留的小数位（如不良率为 2），缺失时由客户端按单位决定
 type Unit = '%' | 'pt' | 'x' | 'CNY'
+```
+
+### Business
+
+```ts
+type Segment = {
+  name: string, revenue?: number,
+  revenue_share?: number,                   // 占主营收入的百分比
+  gross_margin?: number,
+  share_change?: number,                    // 相对上一年的百分点变化，由引擎计算
+}
+
+type Business = {
+  scope?: string,                           // 工商登记的经营范围
+  period?: string,                          // 取最近一个年报；中报口径有季节性，不用
+  previous_period?: string,                 // 占比变化的对比期
+  by: { product: Segment[], region: Segment[], industry: Segment[] },
+  review?: { period: string, chars: number },   // 管理层经营评述的元信息，正文不在分析对象里
+  reviews: string[],                        // 已保存的经营评述报告期
+}
 ```
 
 ### Dividends 与 Check
@@ -222,6 +248,28 @@ type ScheduleStatus = {
 ```
 
 推送给 Webhook 渠道的请求体是 `{ source: 'xmoat', title, text, markdown, events: Alert[] }`。
+
+### Insight
+
+大模型解读。`result` 是解析后的结构；模型没按格式回答时 `result` 缺失、`raw` 是原文。
+`unverified` 是回答里出现、但没能在提供给模型的事实中找到的数字，客户端必须显示这个提示。
+
+```ts
+type Insight = {
+  code: string, name?: string,
+  created_at: string,
+  provider: string, model: string,
+  usage?: { input_tokens?: number, output_tokens?: number },
+  report_period?: string, review_period?: string, valuation_date?: string,
+  result?: {
+    summary: string,
+    moat: { sources: string[], strength: '强' | '中' | '弱' | '无法判断', evidence: string[] },
+    changes: string[], risks: string[], questions: string[],
+  },
+  raw?: string, parse_error?: string,
+  unverified: string[],
+}
+```
 
 ### ValuationSeries
 

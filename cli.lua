@@ -45,6 +45,8 @@ local USAGE = [[
   check                     立即检查：刷新全部自选股，记录变化并推送
   alerts [代码]             最近的提醒
   notify-test               向已配置的推送渠道发送测试消息
+  insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
+  ask <代码> <问题>         就这只股票提问（会产生费用）
   call <命令名> [k=v ...]   调用任意命令，输出 JSON，如 call stock.valuation code=600519 years=5
   commands                  列出全部命令
 ]]
@@ -165,6 +167,57 @@ local function run()
             if not r.ok then bad = bad + 1 end
         end
         return bad > 0 and 1 or 0
+    elseif cmd == 'insight' then
+        if not args[2] then err(USAGE); return 2 end
+        local ins
+        if args[3] ~= 'refresh' then
+            local res = api_call('insight.get', { code = args[2] }, { host = 'cli' })
+            if res.ok then ins = res.data end
+        end
+        if not ins then
+            ins = call('insight.generate', { code = args[2] })
+            if not ins then return 1 end
+        end
+        local r = ins.result
+        out(string.format('# %s（%s）大模型解读', ins.name or args[2], ins.code or args[2]))
+        out(string.format('%s %s · %s · 依据 %s 报告', ins.provider or '', ins.model or '',
+            tostring(ins.created_at), tostring(ins.report_period)))
+        out('')
+        if not r then
+            out('模型没有按格式回答：' .. tostring(ins.parse_error))
+            out(tostring(ins.raw))
+        else
+            out(r.summary)
+            out('')
+            out(string.format('护城河：%s（%s）', r.moat.strength, table.concat(r.moat.sources, '、')))
+            local function section(title, items)
+                if #items == 0 then return end
+                out('')
+                out('## ' .. title)
+                for _, x in ipairs(items) do out('- ' .. x) end
+            end
+            section('证据', r.moat.evidence)
+            section('变化', r.changes)
+            section('风险', r.risks)
+            section('值得核实的问题', r.questions)
+        end
+        if #(ins.unverified or {}) > 0 then
+            out('')
+            out('⚠ 未在事实中找到的数字（勿直接采信）：' .. table.concat(ins.unverified, '、'))
+        end
+        return 0
+    elseif cmd == 'ask' then
+        if not args[2] or not args[3] then err(USAGE); return 2 end
+        local words = {}
+        for i = 3, #args do words[#words + 1] = args[i] end
+        local res = call('insight.ask', { code = args[2], question = table.concat(words, ' ') })
+        if not res then return 1 end
+        out(res.answer)
+        if #(res.unverified or {}) > 0 then
+            out('')
+            out('⚠ 未在事实中找到的数字（勿直接采信）：' .. table.concat(res.unverified, '、'))
+        end
+        return 0
     elseif cmd == 'commands' then
         for _, c in ipairs(api_list()) do
             out(string.format('%-20s %-6s %-36s %s', c.name, c.method or '', c.path or '', c.summary or ''))

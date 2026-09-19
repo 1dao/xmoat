@@ -2,9 +2,9 @@
 --
 -- Exports: source_em_security,
 --          source_em_parse_reports, source_em_parse_valuation,
---          source_em_parse_balance, source_em_parse_dividends,
+--          source_em_parse_balance, source_em_parse_dividends, source_em_parse_business,
 --          source_em_fetch_reports, source_em_fetch_valuation,
---          source_em_fetch_balance, source_em_fetch_dividends
+--          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business
 --
 -- Everything this file returns is in xmoat's own field names. Nothing outside
 -- it knows that Eastmoney calls weighted ROE `ROEJQ`, so a second source
@@ -253,6 +253,73 @@ function g_exports.source_em_fetch_balance(sec, periods)
     end
     table.sort(out, function(a, b) return a.period > b.period end)
     return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Business: F10 BusinessAnalysis/PageAjax ("经营分析")
+--
+-- Three things in one response:
+--   zyfw    business scope, as registered
+--   zygcfx  revenue, cost, profit and gross margin by industry / product /
+--           region, per report period. Numbers arrive as STRINGS here, and the
+--           ratios as fractions (0.8569), unlike the percent everywhere else.
+--   jyps    the management's business review for the latest report only: the
+--           text the model reads. Older ones are kept by engine/stock.lua as
+--           they are fetched, since this endpoint forgets them.
+-- ---------------------------------------------------------------------------
+
+local SEGMENT_KINDS = { ['1'] = 'industry', ['2'] = 'product', ['3'] = 'region' }
+
+local function strnum(v)
+    if type(v) == 'number' then return num(v) end
+    if type(v) == 'string' and v ~= '' then return num(tonumber(v)) end
+    return nil
+end
+
+local function pct_of(v)
+    local x = strnum(v)
+    return x and x * 100 or nil
+end
+
+-- Returns { scope, review = {period, text} | nil, segments = { ... } } or nil
+-- plus a message.
+function g_exports.source_em_parse_business(doc)
+    if type(doc) ~= 'table' or (doc.zygcfx == nil and doc.jyps == nil and doc.zyfw == nil) then
+        return nil, 'unexpected response shape (no zygcfx/jyps/zyfw)'
+    end
+    local out = { segments = {} }
+    local scope = type(doc.zyfw) == 'table' and doc.zyfw[1]
+    out.scope = scope and str(scope.BUSINESS_SCOPE) or nil
+
+    local review = type(doc.jyps) == 'table' and doc.jyps[1]
+    if review and str(review.BUSINESS_REVIEW) and day(review.REPORT_DATE) then
+        out.review = { period = day(review.REPORT_DATE), text = review.BUSINESS_REVIEW }
+    end
+
+    for _, row in ipairs(type(doc.zygcfx) == 'table' and doc.zygcfx or {}) do
+        local period = day(row.REPORT_DATE)
+        local kind = SEGMENT_KINDS[tostring(row.MAINOP_TYPE)]
+        local name = str(row.ITEM_NAME)
+        if period and kind and name then
+            out.segments[#out.segments + 1] = {
+                period = period, kind = kind, name = name,
+                revenue = strnum(row.MAIN_BUSINESS_INCOME),
+                revenue_share = pct_of(row.MBI_RATIO),
+                cost = strnum(row.MAIN_BUSINESS_COST),
+                profit = strnum(row.MAIN_BUSINESS_RPOFIT),     -- sic, the source's spelling
+                gross_margin = pct_of(row.GROSS_RPOFIT_RATIO),
+                rank = strnum(row.RANK),
+            }
+        end
+    end
+    return out
+end
+
+function g_exports.source_em_fetch_business(sec)
+    local url = 'https://emweb.securities.eastmoney.com/PC_HSF10/BusinessAnalysis/PageAjax?code=' .. sec.f10
+    local doc, err = net_get_json(url)
+    if not doc then return nil, err end
+    return source_em_parse_business(doc)
 end
 
 -- ---------------------------------------------------------------------------

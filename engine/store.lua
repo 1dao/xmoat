@@ -12,6 +12,8 @@
 --   <DATA_DIR>/alerts.json          the alert log
 --   <DATA_DIR>/state.json           scheduler bookkeeping
 --   <DATA_DIR>/stocks/<code>.json
+--   <DATA_DIR>/insights/<code>.json  language-model readings, kept apart from
+--                                    source data on purpose
 --
 -- A MySQL backend, if a multi-user server ever needs one, goes behind these
 -- same functions, as gitloom's store.lua does.
@@ -21,8 +23,10 @@ local root = nil
 -- MAIN STATE or anywhere: no yield. `dir` overrides DATA_DIR.
 function g_exports.store_init(dir)
     root = dir or cfg_get('DATA_DIR', 'data')
-    local ok, err = util_dir_make(util_path_join(root, 'stocks'))
-    if not ok then return nil, string.format('cannot create %s: %s', root, tostring(err)) end
+    for _, sub in ipairs({ 'stocks', 'insights' }) do
+        local ok, err = util_dir_make(util_path_join(root, sub))
+        if not ok then return nil, string.format('cannot create %s: %s', root, tostring(err)) end
+    end
     return true
 end
 
@@ -46,6 +50,8 @@ local function path_of(name)
     end
     local code = name:match('^stock:(%d%d%d%d%d%d)$')
     if code then return store_stock_path(code) end
+    code = name:match('^insight:(%d%d%d%d%d%d)$')
+    if code then return util_path_join(root, 'insights', code .. '.json') end
     error('store: unknown document ' .. tostring(name), 3)
 end
 

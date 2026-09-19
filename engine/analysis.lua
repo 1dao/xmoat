@@ -107,6 +107,61 @@ local function build_dividends(data)
     }
 end
 
+-- Revenue by product, region and industry from the latest ANNUAL report, with
+-- each line's change in share against the year before — computed here, so the
+-- model reading this later is handed the change rather than asked to work it
+-- out. Interim breakdowns are skipped: a half-year mix is seasonal.
+local function build_business(data)
+    local b = data.business
+    if type(b) ~= 'table' then return nil end
+    local segments = type(b.segments) == 'table' and b.segments or {}
+
+    local latest
+    for _, s in ipairs(segments) do
+        if s.period:sub(6) == '12-31' and (not latest or s.period > latest) then latest = s.period end
+    end
+    local previous = latest and string.format('%04d-12-31', fin_year_of(latest) - 1) or nil
+
+    local prev_share = {}
+    for _, s in ipairs(segments) do
+        if s.period == previous then prev_share[s.kind .. '|' .. s.name] = util_num(s.revenue_share) end
+    end
+
+    local by = { product = {}, region = {}, industry = {} }
+    local has_previous = false
+    for _, s in ipairs(segments) do
+        if s.period == latest and by[s.kind] then
+            local before = prev_share[s.kind .. '|' .. s.name]
+            if before then has_previous = true end
+            local share = util_num(s.revenue_share)
+            local list = by[s.kind]
+            list[#list + 1] = {
+                name = s.name, revenue = s.revenue, revenue_share = share,
+                gross_margin = s.gross_margin,
+                share_change = (share and before) and (share - before) or nil,
+            }
+        end
+    end
+    for k, list in pairs(by) do
+        table.sort(list, function(x, y) return (x.revenue or 0) > (y.revenue or 0) end)
+        by[k] = util_json_array(list)
+    end
+
+    local review = type(b.reviews) == 'table' and b.reviews[1] or nil
+    return {
+        scope = b.scope,
+        period = latest,
+        previous_period = has_previous and previous or nil,
+        by = by,
+        review = review and { period = review.period, chars = utf8.len(review.text) or #review.text } or nil,
+        reviews = util_json_array((function()
+            local out = {}
+            for _, r in ipairs(type(b.reviews) == 'table' and b.reviews or {}) do out[#out + 1] = r.period end
+            return out
+        end)()),
+    }
+end
+
 -- data:  the stored stock record (engine/stock.lua)
 -- watch: the watchlist entry, or nil
 -- opts:  { dcf = { discount_rate, terminal_growth, years } }
@@ -132,6 +187,7 @@ function g_exports.analysis_build(data, watch, opts)
         quality = quality_build(data.reports or {}, template),
         dividends = build_dividends(data),
         checks = checks_build(data.reports or {}, data.balance or {}, template),
+        business = build_business(data),
         -- Copied: round_floats works in place, and these belong to the store.
         watch = watch and { note = watch.note, added_at = watch.added_at,
                             band = watch.band and util_copy(watch.band) or nil } or nil,

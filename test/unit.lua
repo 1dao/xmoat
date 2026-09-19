@@ -341,6 +341,9 @@ local function fixture_transport(url)
         return body('em_empty.json')
     elseif url:find('zcfzbAjaxNew', 1, true) then
         return body('em_balance_600519.json')
+    elseif url:find('BusinessAnalysis', 1, true) then
+        if url:find('600519', 1, true) then return body('em_business_600519.json') end
+        return { status = 200, headers = {}, body = '{"zyfw":[],"zygcfx":[],"jyps":[]}' }
     end
     return nil, 'unexpected URL in test: ' .. url
 end
@@ -656,13 +659,194 @@ local function test_refresh_events()
     api_call('watchlist.remove', { code = '600519' })
 end
 
+-- ── Phase 4: business breakdown, language models, insights ──────────────────
+
+local function business_record()
+    local parsed = source_em_parse_business(fixture('em_business_600519.json'))
+    return { scope = parsed.scope, reviews = { parsed.review }, segments = parsed.segments }, parsed
+end
+
+local function test_business()
+    section('business breakdown')
+    local biz, parsed = business_record()
+    check('scope parsed', type(parsed.scope) == 'string' and #parsed.scope > 0)
+    eq('the review is the latest report\'s', parsed.review and parsed.review.period, '2026-06-30')
+    eq('segments from three periods', #parsed.segments, 21)
+    local moutai
+    for _, s in ipairs(parsed.segments) do
+        if s.period == '2025-12-31' and s.kind == 'product' and s.name == '茅台酒' then moutai = s end
+    end
+    near('a share arrives as a fraction and is kept as percent', moutai and moutai.revenue_share, 86.7695, 1e-6)
+    near('gross margin likewise', moutai and moutai.gross_margin, 93.5258, 1e-6)
+    check('revenue sent as a string is a number', type(moutai and moutai.revenue) == 'number')
+    eq('a wrong shape is an error', (source_em_parse_business({ foo = 1 })), nil)
+
+    local a = analysis_build({ code = '600519', market = 'SH', name = '贵州茅台', org_type = 'general',
+                               reports = {}, valuation = {}, dividends = {}, business = biz }, nil, {})
+    eq('the breakdown uses the latest annual report', a.business.period, '2025-12-31')
+    eq('and compares with the year before', a.business.previous_period, '2024-12-31')
+    eq('largest line first', a.business.by.product[1].name, '茅台酒')
+    -- 86.7695 (2025) - 85.3884 (2024)
+    near('share change is computed here, not by the model', a.business.by.product[1].share_change, 1.3811, 1e-4)
+    eq('the review is summarised, not copied into the analysis', a.business.review.period, '2026-06-30')
+end
+
+local function test_llm()
+    section('language model protocols')
+    local ac = { provider = 'anthropic', base = 'https://api.anthropic.com', key = 'k', model = 'claude-opus-5',
+                 max_tokens = 16000, fallbacks = true }
+    local req = llm_build(ac, { system = 's', messages = { { role = 'user', content = 'q' } }, schema = { type = 'object' } })
+    eq('Claude: Messages API path', req.url, 'https://api.anthropic.com/v1/messages')
+    eq('Claude: key header', req.headers['x-api-key'], 'k')
+    eq('Claude: version header', req.headers['anthropic-version'], '2023-06-01')
+    eq('Claude: fallbacks on by default', req.body.fallbacks, 'default')
+    eq('Claude: with its beta header', req.headers['anthropic-beta'], 'server-side-fallback-2026-07-01')
+    eq('Claude: a schema becomes output_config.format', req.body.output_config.format.type, 'json_schema')
+    eq('Claude: system is top-level', req.body.system, 's')
+    local plain = llm_build(util_copy(ac), { system = 's', messages = {} })
+    eq('Claude: no schema, no effort, no output_config', plain.body.output_config, nil)
+    local nofb = util_copy(ac); nofb.fallbacks = false
+    eq('Claude: fallbacks can be turned off', llm_build(nofb, { system = 's', messages = {} }).headers['anthropic-beta'], nil)
+
+    local oc = { provider = 'openai', base = 'https://api.deepseek.com/v1', key = 'k', model = 'deepseek-chat', max_tokens = 4000 }
+    local oreq = llm_build(oc, { system = 's', messages = { { role = 'user', content = 'q' } }, schema = {} })
+    eq('OpenAI-compatible: path', oreq.url, 'https://api.deepseek.com/v1/chat/completions')
+    eq('OpenAI-compatible: bearer', oreq.headers.Authorization, 'Bearer k')
+    eq('OpenAI-compatible: system is the first message', oreq.body.messages[1].role, 'system')
+    eq('OpenAI-compatible: JSON mode', oreq.body.response_format.type, 'json_object')
+
+    local ok200 = { status = 200 }
+    local got = llm_parse(ac, ok200, { model = 'claude-opus-5', stop_reason = 'end_turn',
+        content = { { type = 'thinking', thinking = '' }, { type = 'text', text = 'a' }, { type = 'text', text = 'b' } },
+        usage = { input_tokens = 10, output_tokens = 5 } })
+    eq('Claude: text blocks joined, thinking skipped', got and got.text, 'ab')
+    eq('Claude: usage kept', got and got.usage.output_tokens, 5)
+    eq('Claude: a refusal is an error', (llm_parse(ac, ok200, { stop_reason = 'refusal', content = {} })), nil)
+    eq('Claude: a truncated answer is an error',
+        (llm_parse(ac, ok200, { stop_reason = 'max_tokens', content = { { type = 'text', text = 'x' } } })), nil)
+    local _, why = llm_parse(ac, { status = 401 }, { error = { message = 'invalid x-api-key' } })
+    check('an HTTP error carries the service\'s message', why and why:find('invalid x-api-key', 1, true), why)
+
+    local og = llm_parse(oc, ok200, { choices = { { message = { content = 'hi' }, finish_reason = 'stop' } },
+                                      usage = { prompt_tokens = 3, completion_tokens = 2 } })
+    eq('OpenAI-compatible: content', og and og.text, 'hi')
+    eq('OpenAI-compatible: usage mapped', og and og.usage.input_tokens, 3)
+    eq('OpenAI-compatible: length is truncation',
+        (llm_parse(oc, ok200, { choices = { { message = { content = 'x' }, finish_reason = 'length' } } })), nil)
+end
+
+local INSIGHT_JSON = '{"summary":"品牌护城河强，但增速放缓。","moat":{"sources":["品牌","特许经营与牌照"],' ..
+    '"strength":"强","evidence":["主营构成：茅台酒 占 86.8%","毛利率 99.9%"]},"changes":["营收同比 -1.2%"],' ..
+    '"risks":[],"questions":["系列酒毛利率为何低于茅台酒"]}'
+
+local function test_insight()
+    section('insights: facts in, a checked reading out')
+    local nums = {}
+    for _, n in ipairs(insight_numbers('ROE 均值 32.6%，营收 1720.54 亿，2025 年，3 项，变化 -0.8 个百分点，10派280.2423元')) do
+        nums[#nums + 1] = n.text
+    end
+    eq('numbers that make a claim are found; years and counts are not', table.concat(nums, ' '),
+        '32.6 1720.54 0.8 280.2423')
+    local bad = insight_unverified('ROE 32.6%，净利润 999.9 亿，PE 19.4', 'ROE 32.56%，PE 19.45')
+    eq('a figure absent from the facts is flagged', table.concat(bad, ','), '999.9')
+    eq('rounding to the stated precision is not', #insight_unverified('PE 19.5', 'PE 19.45'), 0)
+
+    local parsed = insight_parse('```json\n' .. INSIGHT_JSON .. '\n```')
+    eq('a fenced JSON answer parses', parsed and parsed.moat.strength, '强')
+    eq('an empty list stays a list', parsed and #parsed.risks, 0)
+    eq('prose is not an answer', (insight_parse('这是一段话')), nil)
+    eq('the wrong JSON is not an answer', (insight_parse('{"a":1}')), nil)
+    check('a provider without schemas is told the shape',
+        insight_request('f', 'openai').messages[1].content:find('只输出一个 JSON 对象', 1, true))
+    check('Claude is given the schema instead',
+        not insight_request('f', 'anthropic').messages[1].content:find('只输出一个 JSON 对象', 1, true))
+
+    __llm_set_config(false)
+    eq('without a model, generating is unavailable', api_call('insight.generate', { code = '600519' }).error.code,
+        'unavailable')
+    eq('llm.status says so', api_call('llm.status').data.enabled, false)
+
+    __llm_set_config({ provider = 'anthropic', base = 'https://llm.test', key = 'k', model = 'claude-opus-5',
+                       max_tokens = 16000, timeout_ms = 1000, fallbacks = true })
+    local sent = {}
+    __net_set_transport(function(url, opts)
+        if url:find('llm.test', 1, true) then
+            sent[#sent + 1] = util_json_decode(opts.body)
+            local text = #sent <= 2 and INSIGHT_JSON or '公司 ROE 较高。'
+            return { status = 200, body = util_json_encode({ model = 'claude-opus-5', stop_reason = 'end_turn',
+                content = { { type = 'text', text = text } }, usage = { input_tokens = 100, output_tokens = 50 } }) }
+        end
+        return fixture_transport(url, opts)
+    end)
+    eq('fetch the stock with its business data', api_call('stock.refresh', { code = '600519' }).ok, true)
+    local r = api_call('insight.generate', { code = '600519' })
+    check('generate succeeds', r.ok, r.error and r.error.message)
+    if r.ok then
+        eq('the reading is stored parsed', r.data.result.moat.sources[1], '品牌')
+        check('an invented figure is flagged', table.concat(r.data.unverified, ','):find('99.9', 1, true),
+            table.concat(r.data.unverified, ','))
+        check('a copied figure is not', not table.concat(r.data.unverified, ','):find('86.8', 1, true),
+            table.concat(r.data.unverified, ','))
+        local body = sent[1]
+        check('the model is told not to compute', body.system:find('不要自己计算', 1, true))
+        check('the facts carry the business breakdown', body.messages[1].content:find('【主营构成】', 1, true))
+        check('and the management review', body.messages[1].content:find('【管理层经营评述】', 1, true))
+        eq('the schema is enforced', body.output_config.format.type, 'json_schema')
+    end
+    eq('insight.get returns what was stored', api_call('insight.get', { code = '600519' }).data.created_at,
+        r.ok and r.data.created_at)
+    api_call('insight.generate', { code = '600519' })
+    local stored = store_load('insight:600519')
+    eq('the previous reading moves to history', stored and #stored.history, 1)
+
+    local asked = api_call('insight.ask', { code = '600519', question = 'ROE 高吗？',
+        history = { { role = 'user', content = '毛利率呢？' }, { role = 'assistant', content = '很高。' } } })
+    eq('ask answers', asked.ok and asked.data.answer, '公司 ROE 较高。')
+    local q = sent[#sent]
+    eq('history plus the question make three turns', q and #q.messages, 3)
+    check('the facts ride on the first turn', q and q.messages[1].content:find('【事实】', 1, true))
+    eq('a missing question is refused', api_call('insight.ask', { code = '600519' }).error.code, 'bad_request')
+
+    -- A new annual report during a check produces a reading in the same run.
+    api_call('watchlist.add', { code = '600519' })
+    local doc = fixture('em_reports_600519.json')
+    local fy = util_copy(doc.result.data[1])
+    fy.REPORT_DATE, fy.REPORT_DATE_NAME, fy.NOTICE_DATE = '2026-12-31 00:00:00', '2026年报', '2027-03-28 00:00:00'
+    table.insert(doc.result.data, 1, fy)
+    local reports_body = util_json_encode(doc)
+    __notify_set_channels({})
+    __net_set_transport(function(url, opts)
+        if url:find('llm.test', 1, true) then
+            return { status = 200, body = util_json_encode({ stop_reason = 'end_turn',
+                content = { { type = 'text', text = INSIGHT_JSON } } }) }
+        elseif url:find('RPT_F10_FINANCE_MAINFINADATA', 1, true) then
+            return { status = 200, body = reports_body }
+        end
+        return fixture_transport(url, opts)
+    end)
+    local run = api_call('alerts.run')
+    check('the check runs', run.ok, run.error and run.error.message)
+    local kinds = {}
+    for _, e in ipairs(alerts_list({ code = '600519', limit = 5 })) do
+        kinds[e.kind] = kinds[e.kind] or e       -- newest first: keep the newest of each kind
+    end
+    check('the new annual report is an alert', kinds.report and kinds.report.period == '2026-12-31')
+    check('and so is its reading', kinds.insight and kinds.insight.detail:find('护城河：强', 1, true),
+        kinds.insight and kinds.insight.detail)
+
+    __net_set_transport(nil)
+    __notify_set_channels(nil)
+    __llm_set_config(nil)
+    api_call('watchlist.remove', { code = '600519' })
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local DATA = 'tmp/unit-data'
 
 local function clean()
     for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
-                         'stocks/000001.json', 'stocks/609999.json' }) do
+                         'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -685,6 +869,9 @@ local function run_all()
     test_alerts(evs)
     test_schedule()
     test_refresh_events()
+    test_business()
+    test_llm()
+    test_insight()
 end
 
 return {

@@ -78,6 +78,23 @@ sites use the short name. Entry points run twice (loader detour) — see the top
 - Signing vectors for DingTalk and Feishu in `test/unit.lua` were computed
   independently (Python hmac); keep them when touching `notify_build`.
 
+## Language model (optional)
+
+- `engine/llm.lua` speaks two wire formats and nothing else: Claude's Messages
+  API (raw HTTP — there is no Lua SDK) and OpenAI-compatible chat completions.
+  Claude requests carry `fallbacks: "default"` with its beta header, and JSON
+  answers use `output_config.format`; the OpenAI path asks for `json_object`
+  and `engine/insight.lua` re-checks the shape.
+- `engine/insight.lua` decides what to ask. It hands the model FACTS rendered
+  from the analysis object plus the company's own review text, forbids new
+  numbers, and then verifies: `insight_unverified` extracts every figure from
+  the answer and reports the ones absent from the facts. Clients must show
+  that list — the web card and the CLI both do.
+- `__llm_set_config` replaces the configuration in tests; `false` means "not
+  configured", `nil` restores the real one.
+- Nothing calls the model on its own except a new annual report during a
+  scheduled check (`INSIGHT_ON_ANNUAL_REPORT`). Every other call is a button.
+
 ## Data and numbers
 
 - `engine/source_em.lua` is the only file that knows Eastmoney field names.

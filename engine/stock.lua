@@ -30,6 +30,50 @@ local function merge_by(existing, fresh, key, newest_first)
     return out
 end
 
+-- The management review is only served for the latest report, so reviews are
+-- accumulated here as they are seen: after a year of refreshes there are two
+-- annual ones to compare. Capped, newest first; each text capped too, because
+-- a runaway field should not grow a stock file without bound.
+local MAX_REVIEWS, MAX_REVIEW_BYTES = 8, 30000
+
+local function merge_business(old, fresh)
+    local out = { scope = fresh.scope or old.scope }
+
+    local reviews = {}
+    for _, r in ipairs(type(old.reviews) == 'table' and old.reviews or {}) do reviews[#reviews + 1] = r end
+    if fresh.review then
+        local text = fresh.review.text
+        if #text > MAX_REVIEW_BYTES then text = notify_truncate(text, MAX_REVIEW_BYTES) end
+        local replaced = false
+        for i, r in ipairs(reviews) do
+            if r.period == fresh.review.period then reviews[i] = { period = r.period, text = text }; replaced = true end
+        end
+        if not replaced then reviews[#reviews + 1] = { period = fresh.review.period, text = text } end
+    end
+    table.sort(reviews, function(a, b) return a.period > b.period end)
+    while #reviews > MAX_REVIEWS do table.remove(reviews) end
+    out.reviews = util_json_array(reviews)
+
+    local map = {}
+    local function key(s) return s.period .. '|' .. s.kind .. '|' .. s.name end
+    for _, s in ipairs(type(old.segments) == 'table' and old.segments or {}) do map[key(s)] = s end
+    -- A period the fresh response covers replaces what was kept for it
+    -- wholesale: a segment the company stopped reporting must not linger.
+    local fresh_periods = {}
+    for _, s in ipairs(fresh.segments or {}) do fresh_periods[s.period] = true end
+    for k, s in pairs(map) do if fresh_periods[s.period] then map[k] = nil end end
+    for _, s in ipairs(fresh.segments or {}) do map[key(s)] = s end
+    local segments = {}
+    for _, s in pairs(map) do segments[#segments + 1] = s end
+    table.sort(segments, function(a, b)
+        if a.period ~= b.period then return a.period > b.period end
+        if a.kind ~= b.kind then return a.kind < b.kind end
+        return (a.rank or 99) < (b.rank or 99)
+    end)
+    out.segments = util_json_array(segments)
+    return out
+end
+
 -- Returns the stored record, nil when never fetched, or nil plus a message.
 function g_exports.stock_load(code)
     return store_load('stock:' .. code)
@@ -115,6 +159,17 @@ function g_exports.stock_refresh(code)
             end
         end
 
+        -- Business breakdown and the management review. Not needed by any
+        -- number above, so a failure keeps the previous copy and the refresh.
+        pace()
+        local business = type(old.business) == 'table' and old.business or {}
+        local biz, zerr = source_em_fetch_business(sec)
+        if biz then
+            business = merge_business(business, biz)
+        else
+            cfg_log_warn('%s: business analysis fetch failed: %s', code, tostring(zerr))
+        end
+
         local now = util_now_iso()
         local record = {
             version = 1,
@@ -127,11 +182,13 @@ function g_exports.stock_refresh(code)
             valuation = util_json_array(merge_by(incremental and rows or {}, val.rows, 'date', false)),
             balance = util_json_array(balance),
             dividends = util_json_array(divs),
+            business = business,
             sources = util_json_array({
                 { name = '东方财富', dataset = 'RPT_F10_FINANCE_MAINFINADATA', item = '主要财务指标', fetched_at = now },
                 { name = '东方财富', dataset = 'RPT_VALUEANALYSIS_DET', item = '每日估值', fetched_at = now },
                 { name = '东方财富', dataset = 'RPT_SHAREBONUS_DET', item = '分红送配', fetched_at = now },
                 { name = '东方财富', dataset = 'F10 zcfzbAjaxNew', item = '资产负债表', fetched_at = now },
+                { name = '东方财富', dataset = 'F10 BusinessAnalysis', item = '主营构成与经营评述', fetched_at = now },
             }),
         }
         local sok, swerr = store_save('stock:' .. code, record)

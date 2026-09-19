@@ -23,9 +23,11 @@ return {
     'engine/events.lua',     -- events_*    what changed between two refreshes
     'engine/store.lua',      -- store_*     JSON files under DATA_DIR
     'engine/notify.lua',     -- notify_*    push channels
+    'engine/llm.lua',        -- llm_*       one chat call: Claude or OpenAI-compatible
     'engine/alerts.lua',     -- alerts_*    the alert log, pushing, the check
     'engine/watch.lua',      -- watch_*     the watchlist
     'engine/stock.lua',      -- stock_*     refresh and read one stock
+    'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry
     'engine/commands.lua',   -- commands_*  every command

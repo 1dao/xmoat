@@ -169,6 +169,31 @@ function g_exports.alerts_run()
             refreshed[#refreshed + 1] = rec and { code = e.code, ok = true }
                 or { code = e.code, ok = false, error = { code = ecode, message = emsg } }
         end
+        -- A new annual report is the moment a reading is worth paying for.
+        -- Generated before the flush so it goes out in the same digest.
+        if cfg_bool('INSIGHT_ON_ANNUAL_REPORT', true) and llm_config() then
+            local codes, seen = {}, {}
+            for _, e in ipairs(doc.items) do
+                if e.seq <= seq_before then break end
+                if e.kind == 'report' and tostring(e.period):sub(6) == '12-31' and not seen[e.code] then
+                    seen[e.code] = true
+                    codes[#codes + 1] = e.code
+                end
+            end
+            for _, code in ipairs(codes) do
+                local ins, _, ierr = insight_generate(code)
+                if ins then
+                    alerts_record({ {
+                        id = events_id(code, 'insight|' .. tostring(ins.report_period)),
+                        code = code, name = ins.name, kind = 'insight', period = ins.report_period,
+                        title = '年报解读（大模型）', detail = insight_summary_line(ins),
+                    } })
+                else
+                    cfg_log_warn('%s: annual report insight failed: %s', code, tostring(ierr))
+                end
+            end
+        end
+
         -- A background flush started by an earlier refresh may still be
         -- sending; it cannot see what this run recorded, and flushing now
         -- would only report busy and leave those alerts for tomorrow's check.

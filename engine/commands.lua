@@ -261,9 +261,67 @@ local function install_alerts()
     })
 end
 
+local function install_insight()
+    api_define({
+        name = 'llm.status', method = 'GET', path = '/api/v1/llm',
+        summary = '大模型是否已配置，以及用的是哪个（不含密钥）',
+        handler = function() return llm_status() end,
+    })
+
+    api_define({
+        name = 'insight.get', method = 'GET', path = '/api/v1/stocks/:code/insight',
+        summary = '已保存的大模型解读（不联网）',
+        params = { code = code_param() },
+        handler = function(p)
+            local code, err = security_code(p.code)
+            if not code then return nil, 'bad_request', err end
+            local ins = insight_get(code)
+            if not ins then return nil, 'not_found', '还没有生成过解读' end
+            return ins
+        end,
+    })
+
+    api_define({
+        name = 'insight.generate', method = 'POST', path = '/api/v1/stocks/:code/insight',
+        summary = '请大模型基于已算好的事实生成护城河解读（会产生费用）',
+        params = { code = code_param() },
+        handler = function(p)
+            local code, err = security_code(p.code)
+            if not code then return nil, 'bad_request', err end
+            return insight_generate(code)
+        end,
+    })
+
+    api_define({
+        name = 'insight.ask', method = 'POST', path = '/api/v1/stocks/:code/ask',
+        summary = '就这只股票提问，回答只依据已算好的事实（会产生费用）',
+        params = {
+            code = code_param(),
+            question = { type = 'string', required = true, doc = '问题，500 字以内' },
+            history = { type = 'object', doc = '之前的对话 [{role, content}]，最多 10 条' },
+        },
+        handler = function(p)
+            local code, err = security_code(p.code)
+            if not code then return nil, 'bad_request', err end
+            if (utf8.len(p.question) or #p.question) > 500 then
+                return nil, 'bad_request', '问题太长，请控制在 500 字以内'
+            end
+            local history = {}
+            if p.history then
+                for i, m in ipairs(p.history) do
+                    if i > 10 then break end
+                    if type(m) == 'table' then history[#history + 1] = m end
+                end
+            end
+            return insight_ask(code, p.question, history)
+        end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
     install_watchlist()
     install_stock()
     install_alerts()
+    install_insight()
 end

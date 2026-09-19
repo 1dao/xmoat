@@ -306,8 +306,10 @@
       valuationCard(a),
       chartCard(a, token),
       qualityCard(a),
+      businessCard(a),
       dividendCard(a),
       checksCard(a),
+      insightCard(a, token),
       recentAlertsCard(a.code, token),
       sourcesLine(a));
     view.focus({ preventScroll: true });
@@ -589,9 +591,124 @@
     return card;
   }
 
+  // ── business breakdown ─────────────────────────────────────────────────────
+
+  function businessCard(a) {
+    const b = a.business;
+    if (!b || !b.period) return null;
+    const card = h('section', { class: 'card' });
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '主营构成' }),
+      h('span', { class: 'muted', text: `${b.period} 年报${b.previous_period ? '，占比变化对比 ' + b.previous_period.slice(0, 4) + ' 年' : ''}` })));
+    const NAMES = { product: '按产品', region: '按地区', industry: '按行业' };
+    for (const kind of ['product', 'region', 'industry']) {
+      const list = (b.by && b.by[kind]) || [];
+      if (!list.length) continue;
+      card.append(h('div', { class: 'table-wrap mb' }, h('table', {},
+        h('thead', {}, h('tr', {},
+          h('th', { text: NAMES[kind] }), h('th', { class: 'r', text: '收入' }),
+          h('th', { class: 'r', text: '占比' }), h('th', { class: 'r', text: '占比变化' }),
+          h('th', { class: 'r', text: '毛利率' }))),
+        h('tbody', {}, list.map(s => h('tr', {},
+          h('td', { text: s.name }),
+          h('td', { class: 'r num', text: fmtMoney(s.revenue) }),
+          h('td', { class: 'r num', text: fmtPct(s.revenue_share) }),
+          h('td', { class: 'r num', text: isNum(s.share_change) ? (s.share_change >= 0 ? '+' : '') + fmtNum(s.share_change, 1) + 'pt' : '—' }),
+          h('td', { class: 'r num', text: fmtPct(s.gross_margin) })))))));
+    }
+    if (b.scope) card.append(h('p', { class: 'muted small', text: '经营范围：' + b.scope }));
+    return card;
+  }
+
+  // ── language-model reading ─────────────────────────────────────────────────
+
+  function list(title, items) {
+    if (!items || !items.length) return null;
+    return h('div', { class: 'mt' }, h('div', { class: 'label-sm', text: title }),
+      h('ul', { class: 'plain' }, items.map(x => h('li', { text: x }))));
+  }
+
+  function unverifiedNote(nums) {
+    if (!nums || !nums.length) return null;
+    return h('p', { class: 'warn-note', text: `以下数字没有出现在提供给模型的事实里，可能是模型自己算的或编的，请勿直接采信：${nums.join('、')}` });
+  }
+
+  function insightCard(a, token) {
+    const card = h('section', { class: 'card' });
+    const head = h('div', { class: 'card-head' }, h('h2', { text: '大模型解读' }), h('span', { class: 'spacer' }));
+    const body = h('div');
+    card.append(head, body);
+
+    Promise.all([api('GET', '/api/v1/llm'), api('GET', `/api/v1/stocks/${enc(a.code)}/insight`).catch(e => {
+      if (e.code === 'not_found') return null;
+      throw e;
+    })]).then(([llm, ins]) => {
+      if (stale(token)) return;
+      if (!llm.enabled) {
+        body.append(h('p', { class: 'muted', text: '未配置大模型。' + (llm.hint || '') }));
+        if (!ins) return;
+      }
+      if (llm.enabled) {
+        const gen = h('button', { class: 'btn btn-small', text: ins ? '重新生成' : '生成解读' });
+        gen.addEventListener('click', () => busy(gen, '生成中…', async () => {
+          await api('POST', `/api/v1/stocks/${enc(a.code)}/insight`);
+          showStatus('解读已生成');
+          route();
+        }));
+        head.append(gen);
+      }
+      if (ins) body.append(renderInsight(ins));
+      if (llm.enabled) body.append(askBox(a.code));
+    }).catch(e => { body.append(h('p', { class: 'muted', text: e.message })); });
+    return card;
+  }
+
+  function renderInsight(ins) {
+    const r = ins.result;
+    const box = h('div');
+    box.append(h('p', { class: 'note', text: '以下内容由大模型根据上方已算好的数字和公司经营评述生成，是解读而不是事实；程序已核对其中的数字。' }));
+    if (!r) {
+      box.append(h('p', { class: 'muted', text: '模型的回答没有按要求的格式返回：' + (ins.parse_error || '') }),
+        h('pre', { class: 'raw', text: ins.raw || '' }));
+    } else {
+      box.append(h('p', { class: 'insight-summary', text: r.summary }));
+      box.append(h('dl', { class: 'kv' },
+        h('dt', { text: '护城河强度' }), h('dd', { text: r.moat.strength }),
+        h('dt', { text: '来源' }), h('dd', { text: (r.moat.sources || []).join('、') || '—' })));
+      box.append(list('证据', r.moat.evidence), list('变化', r.changes), list('风险', r.risks),
+        list('值得核实的问题', r.questions));
+    }
+    box.append(unverifiedNote(ins.unverified) || h('span'));
+    box.append(h('p', { class: 'muted small', text: `${ins.provider || ''} ${ins.model || ''} · ${fmtTime(ins.created_at)} · 依据 ${ins.report_period || '—'} 报告、${ins.valuation_date || '—'} 估值` }));
+    return box;
+  }
+
+  function askBox(code) {
+    const history = [];
+    const log = h('div', { class: 'qa-log' });
+    const input = h('input', { type: 'text', maxlength: '500', placeholder: '就这家公司提问，例如：毛利率为什么这么高？', 'aria-label': '问题' });
+    const send = h('button', { class: 'btn btn-small', type: 'submit', text: '提问' });
+    const form = h('form', { class: 'ask-form mt' }, input, send);
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const question = input.value.trim();
+      if (!question) return;
+      busy(send, '…', async () => {
+        const res = await api('POST', `/api/v1/stocks/${enc(code)}/ask`, { question, history: history.slice(-6) });
+        history.push({ role: 'user', content: question }, { role: 'assistant', content: res.answer });
+        log.append(h('div', { class: 'qa' },
+          h('div', { class: 'q', text: '问：' + question }),
+          h('div', { class: 'a', text: res.answer }),
+          unverifiedNote(res.unverified)));
+        input.value = '';
+      });
+    });
+    return h('div', { class: 'mt' }, h('div', { class: 'label-sm', text: '提问（回答只依据上面的事实，会产生模型费用）' }), log, form);
+  }
+
   // ── alerts ─────────────────────────────────────────────────────────────────
 
   const KIND = {
+    insight: { icon: '🧠', label: '大模型解读' },
     report: { icon: '📄', label: '财报' },
     dividend: { icon: '💰', label: '分红' },
     band: { icon: '🎯', label: '你的区间' },
