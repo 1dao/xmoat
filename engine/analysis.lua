@@ -190,9 +190,21 @@ local function build_business(data)
     }
 end
 
+-- The technical block, or a note saying why there is none. Never an error:
+-- nothing above it depends on prices.
+local function build_technical(quotes)
+    local rows = type(quotes) == 'table' and quotes.rows or nil
+    if not rows or #rows == 0 then return nil end
+    local t, why = tech_build(rows, { chips = { days = 500 } })
+    if not t then return { note = why, as_of = quotes.last_date } end
+    t.fetched_at = quotes.fetched_at
+    return t
+end
+
 -- data:  the stored stock record (engine/stock.lua)
 -- watch: the watchlist entry, or nil
--- opts:  { dcf = { discount_rate, terminal_growth, years } }
+-- opts:  { dcf = { discount_rate, terminal_growth, years },
+--          quotes = the cached daily bars (engine/quote.lua), or nil }
 function g_exports.analysis_build(data, watch, opts)
     opts = opts or {}
     local template = data.org_type or 'general'
@@ -216,6 +228,10 @@ function g_exports.analysis_build(data, watch, opts)
         dividends = build_dividends(data),
         checks = checks_build(data.reports or {}, data.balance or {}, template),
         business = build_business(data),
+        -- Prices are cached separately from the reports and are allowed to be
+        -- missing: a stock refreshed before there was a price cache still has
+        -- every other section.
+        technical = build_technical(opts.quotes),
         -- Copied: round_floats works in place, and these belong to the store.
         watch = watch and { note = watch.note, added_at = watch.added_at,
                             band = watch.band and util_copy(watch.band) or nil } or nil,

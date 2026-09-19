@@ -780,6 +780,74 @@ local function market_page(rows, count, page_size)
                         pages = math.ceil((count or #rows) / (page_size or 2000)) } }
 end
 
+local function test_tech()
+    section('technical')
+    -- Closes 1..10, so the 5-day average of the last bar is (6+7+8+9+10)/5.
+    local rows = {}
+    for i = 1, 10 do rows[i] = { date = string.format('2026-01-%02d', i), close = i,
+                                 high = i, low = i, volume = 100, amount = i * 100 * 100 } end
+    eq('a moving average is the mean of the last n closes', tech_ma(rows, 5), 8)
+    eq('and nil when there are not n bars', tech_ma(rows, 20), nil)
+    eq('an average can be taken at an earlier bar', tech_ma(rows, 5, 5), 3)
+    -- (10 - 8) / 8 = 25%.
+    near('bias is the distance from that average, in percent', tech_bias(rows, 5), 25, 1e-9)
+
+    -- 60 days climbing, so every average is above the next longer one.
+    local up = {}
+    for i = 1, 80 do up[i] = { date = string.format('2026-%02d-%02d', 1 + i // 28, 1 + i % 28),
+                               close = 10 + i * 0.1, high = 10 + i * 0.1, low = 10 + i * 0.1 } end
+    local t = tech_build(up)
+    eq('a series that only rises is 多头排列', t.trend.alignment, 'bull')
+    eq('with the close above every average it has', t.trend.above_ma, t.trend.ma_count)
+    local down = {}
+    for i = 1, 80 do down[i] = { date = up[i].date, close = 20 - i * 0.1,
+                                 high = 20 - i * 0.1, low = 20 - i * 0.1 } end
+    eq('and one that only falls is 空头排列', tech_build(down).trend.alignment, 'bear')
+    eq('too few bars say so instead of guessing', (tech_build({ { close = 1 } })), nil)
+
+    -- A hundred days traded at 10, then twenty at 12, 5% of the float a day.
+    -- Each day fades what came before by 5%, so 0.95^20 = 35.8% of the chips
+    -- are still held from 10 and the rest from 12: 0.358*10 + 0.642*12 = 11.28.
+    local chips_rows = {}
+    local function bar(i, price)
+        chips_rows[#chips_rows + 1] = { date = string.format('d%03d', i), close = price,
+            high = price, low = price, volume = 1000, amount = price * 1000 * 100, turnover = 5 }
+    end
+    for i = 1, 100 do bar(i, 10) end
+    for i = 101, 120 do bar(i, 12) end
+    local c = tech_chips(chips_rows)
+    near('the modelled average cost follows the turnover', c.avg_cost, 11.28, 0.05)
+    near('everyone is in profit at the top price', c.profit_ratio, 100, 0.01)
+    near('the 90% band spans both prices', c.low_90, 10, 0.02)
+    near('up to the newer one', c.high_90, 12, 0.02)
+    -- (12 - 10) / (12 + 10) = 9.1%.
+    near('concentration is the width over the middle', c.concentration_90, 9.09, 0.2)
+    local mid = tech_chips(chips_rows)
+    chips_rows[#chips_rows].close = 10.5
+    mid = tech_chips(chips_rows)
+    check('a price in the middle leaves the older chips in profit only',
+        mid.profit_ratio > 30 and mid.profit_ratio < 45, mid.profit_ratio)
+
+    -- Without turnover there is nothing to distribute, and that is said.
+    local no_turnover = {}
+    for i = 1, 120 do no_turnover[i] = { date = string.format('d%03d', i), close = 10,
+                                         high = 10, low = 10 } end
+    local none, why = tech_chips(no_turnover)
+    check('no turnover, no chip distribution', none == nil and why ~= nil, why)
+    local built = tech_build(no_turnover)
+    check('and the rest of the technical block still comes out',
+        built.ma['20'] == 10 and built.chips == nil and built.chips_note ~= nil)
+
+    -- Position within the range: closes from 10 to 20, last at 15.
+    local ranged = {}
+    for i = 1, 60 do ranged[i] = { date = string.format('d%03d', i), close = 10 + i / 6,
+                                   high = 10 + i / 6, low = 10 + i / 6 } end
+    ranged[#ranged].close, ranged[#ranged].high, ranged[#ranged].low = 15, 15, 15
+    local rb = tech_build(ranged)
+    near('the close sits where the range says', rb.range_60.position, 50, 1)
+    near('and its distance from the high is signed', rb.range_60.from_high, -24.8, 0.5)
+end
+
 local function test_quote()
     section('daily prices')
     local k = source_em_parse_kline(fixture('em_kline_600519.json'))
@@ -1256,6 +1324,7 @@ local function run_all()
     test_broker()
     test_market()
     test_quote()
+    test_tech()
 end
 
 return {

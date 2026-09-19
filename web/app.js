@@ -309,6 +309,7 @@
       (a.notes || []).map(n => h('p', { class: 'note', text: n })),
       valuationCard(a),
       chartCard(a, token),
+      technicalCard(a),
       qualityCard(a),
       businessCard(a),
       dividendCard(a),
@@ -598,6 +599,52 @@
         h('div', { class: 'detail', text: c.detail || '' })));
     }
     card.append(list, h('p', { class: 'muted small', text: '阈值是经验规则，不是结论：提示意味着值得打开年报看一看。' }));
+    return card;
+  }
+
+  // ── technical ──────────────────────────────────────────────────────────────
+
+  const ALIGNMENT = { bull: '多头排列', bear: '空头排列', none: '未形成排列' };
+
+  function technicalCard(a) {
+    const t = a.technical;
+    if (!t) return null;
+    const card = h('section', { class: 'card' });
+    const when = t.as_of ? `${t.as_of} 收盘 ${fmtNum(t.close)}` : '';
+    card.append(h('div', { class: 'card-head' }, h('h2', { text: '技术面' }),
+      h('span', { class: 'muted', text: when })));
+    if (t.note) {
+      card.append(h('p', { class: 'muted', text: t.note }));
+      return card;
+    }
+
+    const kv = h('dl', { class: 'kv' });
+    const row = (k, v) => { if (v) kv.append(h('dt', { text: k }), h('dd', {}, v)); };
+    const tags = xs => h('span', { class: 'channel-list' },
+      xs.map(x => h('span', { class: 'tag', text: x })));
+
+    const mas = [5, 10, 20, 60, 120, 250]
+      .filter(n => isNum(t.ma && t.ma[n])).map(n => `MA${n} ${fmtNum(t.ma[n])}`);
+    if (mas.length) row('均线', tags(mas));
+    const tr = t.trend || {};
+    row('排列', h('span', { text: `${ALIGNMENT[tr.alignment] || '—'}，收盘价在 ${tr.above_ma || 0}/${tr.ma_count || 0} 条均线上方` }));
+    const bias = [6, 12, 24, 60]
+      .filter(n => isNum(t.bias && t.bias[n])).map(n => `BIAS${n} ${fmtPct(t.bias[n], 1)}`);
+    if (bias.length) row('乖离率', tags(bias));
+    const r = t.range_250;
+    if (r && isNum(r.high) && isNum(r.low)) {
+      row('位置', h('span', { text: `近 ${r.days} 个交易日 ${fmtNum(r.low)}–${fmtNum(r.high)}，当前分位 ${fmtPct(r.position, 0)}，距高点 ${fmtPct(r.from_high, 1)}` }));
+    }
+    if (isNum(t.volume_ratio)) {
+      row('量能', h('span', { text: `${fmtNum(t.volume_ratio, 2)}（5 日均量 / 60 日均量）` }));
+    }
+    const c = t.chips;
+    if (c) {
+      row('筹码', h('span', { text: `平均成本 ${fmtNum(c.avg_cost)}，获利比例 ${fmtPct(c.profit_ratio, 0)}，90% 成本区间 ${fmtNum(c.low_90)}–${fmtNum(c.high_90)}，集中度 ${fmtPct(c.concentration_90, 0)}` }));
+    } else if (t.chips_note) {
+      row('筹码', h('span', { class: 'muted', text: t.chips_note }));
+    }
+    card.append(kv, h('p', { class: 'muted small', text: '技术面只回答价格在什么位置，不回答公司值不值得买。筹码分布是按换手率估算出来的模型，不是真实持仓，口径见 docs/METRICS.md。' }));
     return card;
   }
 

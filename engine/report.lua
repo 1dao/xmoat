@@ -10,6 +10,8 @@
 
 local null = util_null
 
+local ALIGNMENT = { bull = '多头排列', bear = '空头排列', none = '未形成排列' }
+
 local function has(v) return v ~= nil and v ~= null end
 
 function g_exports.report_money(v)
@@ -93,6 +95,50 @@ function g_exports.report_markdown(a)
             local b = v.band
             f('- 你的区间：%s %s–%s，当前 %s，%s区间', METRIC_LABEL[b.metric] or b.metric,
                 num(b.low), num(b.high), num(b.value), POSITION[b.position] or '')
+        end
+        line()
+    end
+
+    local t = a.technical
+    if t then
+        f('## 技术面（%s 收盘 %s）', t.as_of or '—', num(t.close))
+        line()
+        if t.note then
+            f('- %s', t.note)
+        else
+            local mas = {}
+            for _, n in ipairs(tech_periods.ma) do
+                local v = t.ma and t.ma[tostring(n)]
+                if v then mas[#mas + 1] = string.format('MA%d %s', n, num(v)) end
+            end
+            if #mas > 0 then
+                f('- 均线：%s', table.concat(mas, ' · '))
+            end
+            local tr = t.trend or {}
+            f('- 排列：%s；收盘价在 %d/%d 条均线上方', ALIGNMENT[tr.alignment] or '—',
+                tr.above_ma or 0, tr.ma_count or 0)
+            local bs = {}
+            for _, n in ipairs(tech_periods.bias) do
+                local v = t.bias and t.bias[tostring(n)]
+                if v then bs[#bs + 1] = string.format('BIAS%d %s', n, report_pct(v, 1)) end
+            end
+            if #bs > 0 then f('- 乖离率：%s', table.concat(bs, ' · ')) end
+            local r = t.range_250
+            if r and r.high and r.low then
+                f('- 位置：近 %d 个交易日 %s–%s，当前分位 %s，距高点 %s', r.days,
+                    num(r.low), num(r.high), report_pct(r.position, 0), report_pct(r.from_high, 1))
+            end
+            if t.volume_ratio then
+                f('- 量能：5 日均量 / 60 日均量 = %s', num(t.volume_ratio, 2))
+            end
+            local c = t.chips
+            if c then
+                f('- 筹码：平均成本 %s，获利比例 %s，90%% 成本区间 %s–%s（集中度 %s，%d 个交易日）',
+                    num(c.avg_cost), report_pct(c.profit_ratio, 0), num(c.low_90), num(c.high_90),
+                    report_pct(c.concentration_90, 0), c.days or 0)
+            elseif t.chips_note then
+                f('- 筹码：%s', t.chips_note)
+            end
         end
         line()
     end

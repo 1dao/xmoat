@@ -159,6 +159,13 @@ function g_exports.stock_refresh(code)
             end
         end
 
+        -- Daily prices, for the technical section. A few hundred bytes once
+        -- the series is cached, and nothing above depends on it, so a failure
+        -- is logged and the refresh goes on.
+        pace()
+        local qdoc, _, qerr = quote_refresh(code)
+        if not qdoc then cfg_log_warn('%s: price refresh failed: %s', code, tostring(qerr)) end
+
         -- Business breakdown and the management review. Not needed by any
         -- number above, so a failure keeps the previous copy and the refresh.
         pace()
@@ -189,6 +196,7 @@ function g_exports.stock_refresh(code)
                 { name = '东方财富', dataset = 'RPT_SHAREBONUS_DET', item = '分红送配', fetched_at = now },
                 { name = '东方财富', dataset = 'F10 zcfzbAjaxNew', item = '资产负债表', fetched_at = now },
                 { name = '东方财富', dataset = 'F10 BusinessAnalysis', item = '主营构成与经营评述', fetched_at = now },
+                { name = '东方财富', dataset = 'push2his kline', item = '日线行情（前复权）', fetched_at = now },
             }),
         }
         local sok, swerr = store_save('stock:' .. code, record)
@@ -238,7 +246,10 @@ function g_exports.stock_analysis(code)
     local rec, err = stock_load(code)
     if err then return nil, 'internal', err end
     if not rec then return nil, 'not_fetched', code .. ' 还没有获取过数据，先刷新' end
-    return analysis_build(rec, watch_get(code), { dcf = dcf_params() })
+    -- Prices come from the cache only: stock.get is documented as not going
+    -- to the network, and a refresh is what fills it.
+    return analysis_build(rec, watch_get(code),
+        { dcf = dcf_params(), quotes = quote_series(code, { offline = true }) })
 end
 
 -- The compact line a watchlist row shows. Built from the full analysis so the

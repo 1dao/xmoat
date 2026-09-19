@@ -132,6 +132,7 @@ type Analysis = {
   valuation?: Valuation,
   quality: Quality,
   business?: Business,
+  technical?: Technical,                     // 有日线缓存时才有；没有缓存就整块缺席
   dividends: Dividends,
   checks: Check[],
   watch?: { note?: string, added_at: string, band?: Band },   // 不在自选中则缺失
@@ -174,6 +175,42 @@ type Valuation = {
 type Percentile = { percentile: number, n: number, from: string, to: string, min: number, median: number, max: number }
 
 type BandResult = { metric: string, low?: number, high?: number, value: number, position: 'below' | 'inside' | 'above' }
+```
+
+### Technical
+
+口径见 [METRICS.md](METRICS.md#技术面)。整块来自本地日线缓存（`quote.*`），
+所以一只从未抓过行情的股票没有这一块；抓到的天数不够（少于 20 个交易日）时只有 `note`。
+
+```ts
+type Technical = {
+  as_of: string,                            // 最后一个交易日
+  fetched_at?: string,                      // 这份行情缓存是什么时候抓的
+  days: number,                             // 参与计算的交易日数
+  close: number, change_pct?: number,
+  ma: { [period: string]: number },         // '5' | '10' | '20' | '60' | '120' | '250'
+  bias: { [period: string]: number },       // '6' | '12' | '24' | '60'，%
+  trend: {
+    alignment: 'bull' | 'bear' | 'none',    // 多头排列 / 空头排列 / 未形成
+    above_ma: number, ma_count: number,     // 收盘价站上了几条 / 一共有几条
+  },
+  range_250: Range, range_60: Range,
+  volume_ratio?: number,                    // 5 日均量 / 60 日均量
+  chips?: {                                 // 筹码分布，估算模型
+    days: number, decay: number,
+    avg_cost: number, profit_ratio?: number,          // 平均成本；获利比例 %
+    low_90: number, high_90: number, concentration_90?: number,
+    low_70: number, high_70: number, concentration_70?: number,
+  },
+  chips_note?: string,                      // 算不出筹码时的原因（如指数没有换手率）
+  note?: string,                            // 整块算不出时的原因
+}
+
+type Range = {
+  days: number, high: number, low: number,
+  position?: number,                        // 收盘价在区间里的百分位，0 最低 100 最高
+  from_high?: number,                       // 相对最高价的涨跌幅 %，负数是离高点的距离
+}
 ```
 
 ### Quality
