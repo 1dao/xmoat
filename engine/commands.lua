@@ -419,6 +419,43 @@ local function install_review()
     })
 end
 
+local function install_market_list()
+    api_define({
+        name = 'market.list', method = 'GET', path = '/api/v1/market/list',
+        summary = '全市场股票列表：代码、名称、行业、市值（来自本地快照，不联网）',
+        params = {
+            limit = { type = 'integer', doc = '默认全部（约 5500 只）' },
+            board = { type = 'string', doc = '板块：main、gem、star、bj' },
+            industry = { type = 'string', doc = '行业名包含' },
+            keyword = { type = 'string', doc = '名称或代码包含' },
+            include_st = { type = 'boolean', doc = '包含 ST（默认排除）' },
+        },
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            local res, ecode, emsg = market_screen({
+                limit = p.limit or 6000,
+                boards = p.board and { p.board } or nil,
+                industry = p.industry, keyword = p.keyword,
+                include_st = p.include_st,
+                sort = 'market_cap', order = 'desc',
+            })
+            if not res then return nil, ecode or 'not_fetched', emsg or '还没有全市场快照' end
+            local out = {}
+            for _, r in ipairs(res.rows or {}) do
+                out[#out + 1] = { code = r.code, name = r.name, industry = r.industry,
+                                  board = r.board, st = r.st, close = r.close,
+                                  market_cap = r.market_cap }
+            end
+            return { trade_date = res.snapshot and res.snapshot.trade_date,
+                     fetched_at = res.snapshot and res.snapshot.fetched_at,
+                     matched = res.matched, count = #out,
+                     rows = util_json_array(out) }
+        end,
+    })
+end
+
 local function install_quote()
     api_define({
         name = 'quote.get', method = 'GET', path = '/api/v1/stocks/:code/quotes',
@@ -577,9 +614,10 @@ end
 local function strategy_params(with_grid)
     local p = {
         codes = { type = 'string', doc = '股票代码，逗号分隔；给了就用它，不看 universe' },
-        universe = { type = 'string', enum = { 'watchlist', 'screen' },
-                     doc = '默认 watchlist；screen 用全市场快照按下面的条件筛' },
-        limit = { type = 'integer', doc = '最多看多少只，默认 30，最多 1000' },
+        universe = { type = 'string', enum = { 'watchlist', 'screen', 'market' },
+                     doc = '默认 watchlist；screen 按下面的条件筛；market 是全市场每一只' },
+        limit = { type = 'integer', doc = '最多看多少只，默认 30；universe=market 时可到 6000（全市场）' },
+        bars_days = { type = 'integer', doc = '每只股票抓多少个交易日，默认按 QUOTE_MAX_DAYS' },
         roe_min = { type = 'number', doc = 'universe=screen 时的筛选条件' },
         pe_max = { type = 'number' }, pb_max = { type = 'number' },
         cap_min = { type = 'number', doc = '总市值下限（亿元）' },
@@ -623,7 +661,7 @@ local function strategy_common(p)
     end
     return {
         codes = codes, universe = p.universe, limit = p.limit,
-        price_source = p.price_source,
+        price_source = p.price_source, bars_days = p.bars_days,
         filters = { roe_min = p.roe_min, pe_max = p.pe_max, pb_max = p.pb_max,
                     cap_min = p.cap_min, industry = p.industry, include_st = p.include_st,
                     sort = 'roe', order = 'desc' },
@@ -638,8 +676,11 @@ local function install_strategy()
         summary = '在一组股票上一起拟合参数：均线走平后突破，哪组窗口与幅度最好',
         params = strategy_params(true),
         handler = function(p)
-            if p.limit and (p.limit < 1 or p.limit > 1000) then
-                return nil, 'bad_request', 'limit 应在 1 到 1000 之间'
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.bars_days and (p.bars_days < 60 or p.bars_days > 5000) then
+                return nil, 'bad_request', 'bars_days 应在 60 到 5000 之间'
             end
             if p.horizon and (p.horizon < 5 or p.horizon > 500) then
                 return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
@@ -662,12 +703,42 @@ local function install_strategy()
     })
 
     api_define({
+        name = 'strategy.prefetch', method = 'POST', path = '/api/v1/strategy/prefetch',
+        summary = '批量把一组股票的日线抓到本地（通达信协议，多连接并行）',
+        params = strategy_params(false),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.bars_days and (p.bars_days < 60 or p.bars_days > 5000) then
+                return nil, 'bad_request', 'bars_days 应在 60 到 5000 之间'
+            end
+            local opts = strategy_common(p)
+            local list, kind = strategy_universe(opts)
+            if #list == 0 then return nil, 'bad_request', '没有可用的股票' end
+            local codes = {}
+            for _, item in ipairs(list) do codes[#codes + 1] = item.code end
+            local t0 = util_now_ms()
+            local res = quote_prefetch(codes, {
+                source = p.price_source or cfg_get('STRATEGY_PRICE_SOURCE', 'tdx'),
+                max_days = p.bars_days,
+            })
+            res.ms = util_now_ms() - t0
+            res.universe = kind
+            return res
+        end,
+    })
+
+    api_define({
         name = 'strategy.scan', method = 'GET', path = '/api/v1/strategy/scan',
         summary = '扫描现在正在发出信号的股票：均线走平后突破',
         params = strategy_params(false),
         handler = function(p)
-            if p.limit and (p.limit < 1 or p.limit > 1000) then
-                return nil, 'bad_request', 'limit 应在 1 到 1000 之间'
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.bars_days and (p.bars_days < 60 or p.bars_days > 5000) then
+                return nil, 'bad_request', 'bars_days 应在 60 到 5000 之间'
             end
             if p.ma_days and (p.ma_days < 2 or p.ma_days > 500) then
                 return nil, 'bad_request', 'ma_days 应在 2 到 500 之间'
@@ -689,6 +760,7 @@ function g_exports.commands_install()
     install_system()
     install_market()
     install_quote()
+    install_market_list()
     install_review()
     install_backtest()
     install_sweep()

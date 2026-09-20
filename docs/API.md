@@ -64,6 +64,8 @@
 | `quote.get` | `GET /api/v1/stocks/:code/quotes` | `days?`（默认 250），`offline?` | `Quotes`；本地缓存够新就直接返回 |
 | `quote.refresh` | `POST /api/v1/stocks/:code/quotes/refresh` | `full?` | `Quotes`（不含 rows）；已有缓存时只抓最后一天之后的部分 |
 | `backtest.run` | `GET /api/v1/stocks/:code/backtest` | `signal?`，`percentile?`，`take_profit?`，`stop_loss?`，`horizon?`，`cooldown?`，`offline?` | `Backtest`：方向胜率、止盈止损命中率，以及同窗口的基准 |
+| `market.list` | `GET /api/v1/market/list` | `limit?`，`board?`，`industry?`，`keyword?`，`include_st?` | 全市场股票列表（本地快照，不联网） |
+| `strategy.prefetch` | `POST /api/v1/strategy/prefetch` | `codes?` / `universe?` / `limit?`，`bars_days?`，`price_source?` | `{total, cached, fetched, failed, ms}`：把一组股票的日线抓到本地 |
 | `backtest.sweep` | `GET /api/v1/stocks/:code/backtest/sweep` | `horizon?`，`ma_days?`，`above_pct?`，`flat_max?`，`objective?`，`min_entries?`，`max_worst?` … | `Sweep`：一只股票上的参数网格 |
 | `strategy.sweep` | `GET /api/v1/strategy/sweep` | 同上，外加 `codes?` / `universe?` / `limit?` 与筛选条件 | `Sweep`：一组股票合在一起拟合 |
 | `strategy.scan` | `GET /api/v1/strategy/scan` | `ma_days?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
@@ -381,6 +383,15 @@ type Sweep = {
   baseline: { n: number, win_rate?: number, avg?: number, median?: number, worst?: number },
   fetch?: { total: number, cached: number, fetched: number, ms?: number, failed: {code, error}[] },
   notes: string[],
+}
+
+type MarketList = {
+  trade_date: string, fetched_at: string,
+  matched: number,                          // 符合条件的总数
+  count: number,                            // 这次返回了多少
+  rows: { code: string, name: string, industry?: string,
+          board: 'main' | 'gem' | 'star' | 'bj' | 'other',
+          st?: true, close?: number, market_cap?: number }[],
 }
 
 type Scan = {

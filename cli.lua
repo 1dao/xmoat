@@ -50,6 +50,8 @@ local USAGE = [[
   backtest <代码> [信号]    在这只股票的历史上回放信号：value/trend/value_trend/band/breakout
   sweep <代码> [k=v ...]    参数网格（单只股票）：均线走平后突破，哪组窗口和幅度最好
                             如 sweep 600519 horizon=60 max_worst=-15 min_entries=15
+  stocks [k=v ...]          全市场股票列表（本地快照），如 stocks board=star industry=半导体
+  prefetch [k=v ...]        批量抓日线备好本地，如 prefetch universe=market limit=500 bars_days=400
   fit [k=v ...]             在一组股票上一起拟合参数，如 fit universe=screen roe_min=15 limit=30
   scan [k=v ...]            扫描现在正在发信号的股票，如 scan universe=screen roe_min=15 limit=50
   screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
@@ -97,6 +99,38 @@ local function run()
         local r = call('review.daily', { offline = args[2] == 'offline' })
         if not r then return 1 end
         out(report_review_markdown(r))
+        return 0
+    elseif cmd == 'stocks' then
+        local params = {}
+        for i = 2, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if k then params[k] = v end
+        end
+        local r = call('market.list', params)
+        if not r then return 1 end
+        out(string.format('| 代码 | 名称 | 行业 | 板块 | 市值(亿) |'))
+        out('|---|---|---|---|---|')
+        for _, x in ipairs(r.rows) do
+            out(string.format('| %s | %s | %s | %s | %s |', x.code, x.name or '—',
+                x.industry or '—', x.board or '—',
+                type(x.market_cap) == 'number' and string.format('%.0f', x.market_cap / 1e8) or '—'))
+        end
+        out(string.format('\n%s 收盘的快照：符合条件 %d 只，列出 %d 只', r.trade_date or '—',
+            r.matched or 0, r.count or 0))
+        return 0
+    elseif cmd == 'prefetch' then
+        local params = {}
+        for i = 2, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if k then params[k] = v end
+        end
+        local r = call('strategy.prefetch', params)
+        if not r then return 1 end
+        out(string.format('%d 只：缓存命中 %d，新抓 %d，失败 %d，用时 %.1f 秒',
+            r.total or 0, r.cached or 0, r.fetched or 0, #(r.failed or {}), (r.ms or 0) / 1000))
+        for i = 1, math.min(5, #(r.failed or {})) do
+            out(string.format('  %s %s', r.failed[i].code, r.failed[i].error))
+        end
         return 0
     elseif cmd == 'fit' or cmd == 'scan' then
         local params = {}

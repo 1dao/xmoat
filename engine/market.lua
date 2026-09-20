@@ -26,7 +26,10 @@
 -- analysis object.
 
 local PAGE_VALUATION, PAGE_REPORTS = 2000, 500
-local MAX_ROWS = 500
+-- The whole market fits: 5,500-odd rows, and a strategy scan legitimately
+-- wants all of them. A browser does not, which is why the command that serves
+-- one keeps its own smaller ceiling.
+local MAX_ROWS = 6000
 
 local doc = nil          -- the snapshot, nil until loaded
 local refreshing = false

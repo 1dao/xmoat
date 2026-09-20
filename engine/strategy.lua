@@ -48,22 +48,25 @@ local function prefetch(list, opts)
     if opts.offline then return { total = #codes, cached = 0, fetched = 0,
                                   failed = util_json_array({}) } end
     local t0 = util_now_ms()
-    local res = quote_prefetch(codes, { source = scan_source(opts), force = opts.force })
+    local res = quote_prefetch(codes, { source = scan_source(opts), force = opts.force,
+                                        max_days = opts.bars_days })
     res.ms = util_now_ms() - t0
     return res
 end
 
--- Codes to work on. `codes` wins; otherwise the watchlist, or a screen of the
--- market snapshot when filters are given.
+-- Codes to work on. `codes` wins; otherwise the watchlist, or the market
+-- snapshot — every row of it with `universe = 'market'`, or the ones that pass
+-- the filters with `universe = 'screen'`.
 --
--- opts = { codes = {...}, universe = 'watchlist' | 'screen', filters, limit }
--- COROUTINE-FREE: the screen reads the stored snapshot.
+-- opts = { codes = {...}, universe = 'watchlist' | 'screen' | 'market',
+--          filters, limit }
+-- COROUTINE-FREE: it reads the stored snapshot.
 function g_exports.strategy_universe(opts)
     opts = opts or {}
-    -- A thousand is a few minutes of fetching over the TDX connections and
-    -- well inside what the snapshot holds; the default stays small because a
+    -- The whole market is allowed: 5,500 stocks is twenty minutes of fetching
+    -- the first time and seconds afterwards. The default stays small because a
     -- scan is usually a question about a shortlist.
-    local limit = math.max(1, math.min(opts.limit or 30, 1000))
+    local limit = math.max(1, math.min(opts.limit or 30, 6000))
     local out = {}
     if type(opts.codes) == 'table' and #opts.codes > 0 then
         for _, c in ipairs(opts.codes) do
@@ -73,17 +76,19 @@ function g_exports.strategy_universe(opts)
         end
         return out, 'codes'
     end
-    if opts.universe == 'screen' then
-        local filters = util_copy(opts.filters)
+    if opts.universe == 'screen' or opts.universe == 'market' then
+        -- 'market' is 'screen' with nothing asked of the rows.
+        local filters = opts.universe == 'market' and {} or util_copy(opts.filters)
         filters.limit = limit
+        filters.sort = filters.sort or 'market_cap'
         local res = market_screen(filters)
-        if not res or not res.rows then return {}, 'screen' end
+        if not res or not res.rows then return {}, opts.universe end
         for _, r in ipairs(res.rows) do
             out[#out + 1] = { code = r.code, name = r.name, industry = r.industry,
                               pe_ttm = r.pe_ttm, pb = r.pb, roe = r.roe,
                               market_cap = r.market_cap }
         end
-        return out, 'screen'
+        return out, opts.universe
     end
     for _, e in ipairs(watch_list()) do
         out[#out + 1] = { code = e.code }

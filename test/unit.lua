@@ -1571,6 +1571,26 @@ local function test_market()
     local row = all.rows[1]
     eq('the row carries what the table showed', row.code, '600001')
     near('with the derived cash-flow ratio', row.ocf_to_eps, 1.2, 1e-9)
+
+    -- The plain list: every code, no conditions, from the stored snapshot.
+    local list = api_call('market.list', {})
+    check('the whole list comes out of the snapshot', list.ok, list.error and list.error.message)
+    eq('ST is left out of it too', list.ok and list.data.matched, 2)
+    eq('and the rows are the ones that matched', list.ok and #list.data.rows, 2)
+    eq('each carries its board', list.ok and list.data.rows[1].board ~= nil, true)
+    eq('largest first', list.ok and list.data.rows[1].code, '600001')
+    eq('the trade date comes with it', list.ok and list.data.trade_date, '2026-09-18')
+    eq('a board filter narrows it', api_call('market.list', { board = 'gem' }).data.matched, 1)
+    eq('including ST when asked', api_call('market.list', { include_st = 'true' }).data.matched, 3)
+
+    -- 'market' as a universe is that same list, without the 500-row ceiling a
+    -- browser needs.
+    local everything = strategy_universe({ universe = 'market', limit = 6000 })
+    eq('a universe can be the whole market', #everything, 2)
+    eq('and it carries what the snapshot knew', everything[1].name ~= nil, true)
+    eq('a screen is the same list with conditions', #strategy_universe({
+        universe = 'screen', filters = { roe_min = 20 }, limit = 6000 }), 1)
+    eq('the limit still applies', #strategy_universe({ universe = 'market', limit = 1 }), 1)
 end
 
 -- ── Phase 5: the insurance and broker templates ─────────────────────────────

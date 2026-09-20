@@ -117,8 +117,10 @@ end
 -- Returns the document, or nil plus (error code, message).
 --
 -- opts = { full = true } forces the whole history rather than an extension,
--- and opts.source ('em' or 'tdx') which source to ask; the default is
--- PRICE_SOURCE. A cache filled by the other one is replaced, not extended.
+-- opts.source ('em' or 'tdx') picks which source to ask (the default is
+-- PRICE_SOURCE; a cache filled by the other one is replaced, not extended),
+-- and opts.max_days overrides QUOTE_MAX_DAYS — a scan of the whole market
+-- keeps a few hundred days per stock rather than five years of them.
 function g_exports.quote_refresh(code, opts)
     opts = opts or {}
     local t, terr = quote_resolve(code)
@@ -150,7 +152,7 @@ function g_exports.quote_refresh(code, opts)
         if source == 'tdx' then
             -- TDX serves N bars back from the newest, so an extension asks for
             -- the gap plus a little: there is no "since this date" form.
-            local want = cfg_int('QUOTE_MAX_DAYS', 1200)
+            local want = opts.max_days or cfg_int('QUOTE_MAX_DAYS', 1200)
             if last then
                 local gap = util_date_diff_days(last, util_today()) or 0
                 want = math.min(want, math.max(20, math.floor(gap * 0.75) + OVERLAP_DAYS))
@@ -183,7 +185,7 @@ function g_exports.quote_refresh(code, opts)
         -- Keep the newest QUOTE_MAX_DAYS. Four years covers a 250-day average,
         -- a chip distribution and a backtest over several cycles; the whole
         -- history would be six times that for a stock listed in the nineties.
-        local max_days = cfg_int('QUOTE_MAX_DAYS', 1200)
+        local max_days = opts.max_days or cfg_int('QUOTE_MAX_DAYS', 1200)
         if max_days > 0 and #merged > max_days then
             local cut = {}
             for i = #merged - max_days + 1, #merged do cut[#cut + 1] = merged[i] end
@@ -244,6 +246,8 @@ end
 -- already cached and fresh cost nothing at all.
 --
 -- opts = { source, workers, force, max_days, on_progress }
+-- max_days is passed through: bars kept per stock, for when the universe is
+-- the whole market and five years of every one of them is not worth the disk.
 -- Returns { total, fetched, cached, failed = { {code, error} } }.
 function g_exports.quote_prefetch(codes, opts)
     opts = opts or {}
@@ -271,7 +275,8 @@ function g_exports.quote_prefetch(codes, opts)
             if fresh then
                 out.cached = out.cached + 1
             else
-                local got, _, err = quote_refresh(code, { source = source, full = opts.force })
+                local got, _, err = quote_refresh(code, { source = source, full = opts.force,
+                                                          max_days = opts.max_days })
                 if got then
                     out.fetched = out.fetched + 1
                 else
