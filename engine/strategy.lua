@@ -2,7 +2,7 @@
 -- numbers on a pooled history, and scanning for the ones firing now.
 --
 -- Exports: strategy_universe, strategy_collect, strategy_pool,
---          strategy_sweep, strategy_scan
+--          strategy_sweep, strategy_scan, strategy_attribute
 --
 -- WHY THIS EXISTS SEPARATELY FROM backtest.lua. That file answers "what would
 -- this rule have done to this stock". Useful, and not enough to choose the
@@ -359,5 +359,167 @@ function g_exports.strategy_scan(opts)
         hits = util_json_array(hits), skipped = util_json_array(skipped),
         note = '这是信号，不是结论：它只说价格从一个平台上走了出来，' ..
                '这家公司值不值得买仍然要看财报、估值和检查清单。',
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Attribution: where does the rule work better?
+--
+-- The tempting version of this question answers itself wrongly. Group the
+-- signals by industry, sort by return, and the top of the list is whichever
+-- industry rose over the window — semiconductors did, so signals in
+-- semiconductors made money whether or not the signal meant anything.
+--
+-- So every group is compared against ITS OWN baseline: the same stocks, the
+-- same window, bought on any day. What is reported is the difference. And
+-- because a hundred groups are being asked the same question, the summary
+-- says how many of them beat their own baseline — if it is about half, the
+-- list is noise sorted by luck.
+--
+-- Returns are accumulated as histograms rather than kept: two million daily
+-- returns across three groupings is a lot of numbers to hold, and half a
+-- percent of resolution on a median is plenty.
+-- ---------------------------------------------------------------------------
+
+local HIST_LOW, HIST_STEP, HIST_BINS = -100, 0.5, 1000
+
+local function hist_new()
+    return { n = 0, sum = 0, wins = 0, bins = {}, min = nil, max = nil }
+end
+
+local function hist_add(h, v)
+    h.n = h.n + 1
+    h.sum = h.sum + v
+    if v > 0 then h.wins = h.wins + 1 end
+    if not h.min or v < h.min then h.min = v end
+    if not h.max or v > h.max then h.max = v end
+    local i = math.floor((v - HIST_LOW) / HIST_STEP)
+    if i < 0 then i = 0 elseif i > HIST_BINS then i = HIST_BINS end
+    h.bins[i] = (h.bins[i] or 0) + 1
+end
+
+local function hist_stats(h)
+    if h.n == 0 then return { n = 0 } end
+    local want, acc, median = h.n / 2, 0, nil
+    for i = 0, HIST_BINS do
+        local c = h.bins[i]
+        if c then
+            acc = acc + c
+            if not median and acc >= want then
+                median = HIST_LOW + (i + 0.5) * HIST_STEP
+            end
+        end
+    end
+    return { n = h.n, win_rate = h.wins / h.n * 100, avg = h.sum / h.n,
+             median = median, best = h.max, worst = h.min }
+end
+
+-- COROUTINE-ONLY. One parameter set across a universe, grouped by industry,
+-- listing board and region.
+--
+-- opts: the usual universe options, plus the rule's own parameters and
+--   horizon      = 60
+--   min_signals  = 30    -- fewer than this and a group is counted, not ranked
+--   group        = 'industry' | 'board' | 'region', or nil for all three
+function g_exports.strategy_attribute(opts)
+    opts = util_copy(opts)
+    local horizon = opts.horizon or 60
+    local min_signals = opts.min_signals or 30
+    local list, kind = strategy_universe(opts)
+    if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
+
+    local fetch = prefetch(list, opts)
+    local regions = groups_regions({ offline = opts.offline })
+    if not regions then cfg_log_warn('没有地域映射，只能按行业和板块分组') end
+
+    local kinds = opts.group and { opts.group } or { 'industry', 'board', 'region' }
+
+    -- cells[kind][value] = { signal = hist, base = hist, stocks, fired }
+    local cells, used, skipped = {}, 0, {}
+    for _, k in ipairs(kinds) do cells[k] = {} end
+
+    for _, item in ipairs(list) do
+        local px, why = bars_for(item.code, opts)
+        if not px or #px < horizon + (opts.ma_days or 50) + (opts.flat_lookback or 25) then
+            skipped[#skipped + 1] = { code = item.code, reason = px and '日线太短' or tostring(why) }
+        else
+            used = used + 1
+            local g = groups_of({ code = item.code, industry = item.industry,
+                                  board = item.board }, regions)
+            local found = backtest_breakout(px, {
+                ma_days = opts.ma_days or 50, flat_lookback = opts.flat_lookback,
+                flat_max = opts.flat_max or 2, above_pct = opts.above_pct or 6,
+                min_day_gain = opts.min_day_gain, cooldown = opts.cooldown,
+            })
+            for _, k in ipairs(kinds) do
+                local value = g[k]
+                if value then
+                    local cell = cells[k][value]
+                    if not cell then
+                        cell = { signal = hist_new(), base = hist_new(), stocks = 0, fired = 0 }
+                        cells[k][value] = cell
+                    end
+                    cell.stocks = cell.stocks + 1
+                    if #found.entries > 0 then cell.fired = cell.fired + 1 end
+                    for _, e in ipairs(found.entries) do
+                        local to = px[e.index + horizon]
+                        if to and e.close and e.close > 0 and to.close then
+                            hist_add(cell.signal, (to.close / e.close - 1) * 100)
+                        end
+                    end
+                    -- The group's own baseline: every day of every one of its
+                    -- stocks, held the same number of days.
+                    for i = 1, #px - horizon do
+                        local a, b = util_num(px[i].close), util_num(px[i + horizon].close)
+                        if a and b and a > 0 then hist_add(cell.base, (b / a - 1) * 100) end
+                    end
+                end
+            end
+        end
+    end
+
+    local out, beat, ranked_total = {}, 0, 0
+    for _, k in ipairs(kinds) do
+        local rows, thin = {}, 0
+        for value, cell in pairs(cells[k]) do
+            local sig, base = hist_stats(cell.signal), hist_stats(cell.base)
+            local row = {
+                group = k, value = value, label = groups_label(k, value),
+                stocks = cell.stocks, fired = cell.fired, signals = sig.n,
+                win_rate = sig.win_rate, median = sig.median, avg = sig.avg, worst = sig.worst,
+                base_win_rate = base.win_rate, base_median = base.median, base_avg = base.avg,
+                edge = (sig.median and base.median) and (sig.median - base.median) or nil,
+                edge_win = (sig.win_rate and base.win_rate) and (sig.win_rate - base.win_rate) or nil,
+            }
+            if sig.n >= min_signals then
+                rows[#rows + 1] = row
+                ranked_total = ranked_total + 1
+                if (row.edge or 0) > 0 then beat = beat + 1 end
+            else
+                thin = thin + 1
+            end
+        end
+        table.sort(rows, function(a, b) return (a.edge or -1e9) > (b.edge or -1e9) end)
+        out[#out + 1] = { group = k, rows = util_json_array(rows), thin = thin }
+    end
+
+    return {
+        universe = kind, stocks = used, skipped = util_json_array(skipped), fetch = fetch,
+        horizon = horizon, min_signals = min_signals,
+        params = { ma_days = opts.ma_days or 50, above_pct = opts.above_pct or 6,
+                   flat_max = opts.flat_max or 2, flat_lookback = opts.flat_lookback or 25,
+                   min_day_gain = opts.min_day_gain or 0, cooldown = opts.cooldown or 20 },
+        regions = regions and { fetched_at = regions.fetched_at, stocks = regions.stocks } or nil,
+        groups = util_json_array(out),
+        summary = { ranked = ranked_total, beat_own_baseline = beat },
+        notes = util_json_array({
+            '每一组都和它自己的基准比：同样这些股票、同一窗口里随便哪天买。' ..
+            '不这么比的话，排在前面的只会是这五年本来就涨的行业，和信号有没有用无关。',
+            string.format('一共排了 %d 组，其中 %d 组的信号中位数高于自己的基准；' ..
+                          '这个比例接近一半的话，这张表就是按运气排序的噪声。',
+                          ranked_total, beat),
+            '同一波行情会让一个行业里的股票同时出信号，所以组内的样本远不如数量看上去那么独立。',
+            '不含交易成本、滑点和停牌；价格用前复权。',
+        }),
     }
 end

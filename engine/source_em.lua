@@ -7,7 +7,8 @@
 --          source_em_fetch_reports, source_em_fetch_valuation,
 --          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business,
 --          source_em_fetch_kline, source_em_secid,
---          source_em_parse_sectors, source_em_fetch_sectors
+--          source_em_parse_sectors, source_em_fetch_sectors,
+--          source_em_fetch_board_members
 --
 -- Everything this file returns is in xmoat's own field names. Nothing outside
 -- it knows that Eastmoney calls weighted ROE `ROEJQ`, so a second source
@@ -601,7 +602,8 @@ local CLIST_HOSTS = { 'https://push2.eastmoney.com', 'https://push2delay.eastmon
 local CLIST_UT = 'bd1d9ddb04089700cf9c27f6f7426281'
 
 -- Boards, as the quote server numbers them: t:2 is 行业板块, t:3 概念板块.
-local SECTOR_FS = { industry = 'm%3A90%2Bt%3A2', concept = 'm%3A90%2Bt%3A3' }
+local SECTOR_FS = { industry = 'm%3A90%2Bt%3A2', concept = 'm%3A90%2Bt%3A3',
+                    region = 'm%3A90%2Bt%3A1' }
 
 -- A field is '-' when the server has no value for it, which tonumber rejects
 -- for us.
@@ -686,4 +688,45 @@ function g_exports.source_em_fetch_sectors(kind, max_pages)
         return (a.change_pct or -1e9) > (b.change_pct or -1e9)
     end)
     return { rows = rows, count = first.count, host = host }
+end
+
+-- The stocks in one board. Boards are paged like everything else on this
+-- endpoint — Guangdong has seven hundred members — so this follows the pages
+-- until it has them all. COROUTINE-ONLY.
+function g_exports.source_em_fetch_board_members(board, max_pages)
+    if type(board) ~= 'string' or not board:match('^BK%d+$') then
+        return nil, 'not a board code: ' .. tostring(board)
+    end
+    local function url_for(host, page)
+        return host .. '/api/qt/clist/get?ut=' .. CLIST_UT ..
+            '&pn=' .. tostring(page) .. '&pz=' .. SECTOR_PAGE ..
+            '&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b%3A' .. board ..
+            '&fields=f12,f14'
+    end
+    local rows, total, host, last = {}, nil, nil, nil
+    for page = 1, math.min(max_pages or 20, 60) do
+        local doc, err
+        if host then
+            doc, err = net_get_json(url_for(host, page), { timeout_ms = 20000 })
+        else
+            for _, h in ipairs(CLIST_HOSTS) do
+                doc, err = net_get_json(url_for(h, page), { timeout_ms = 20000 })
+                if doc then host = h; break end
+            end
+        end
+        local d = type(doc) == 'table' and doc.data or nil
+        if d == nil or d == util_null or type(d) ~= 'table' or type(d.diff) ~= 'table' then
+            last = err or 'unexpected response shape'
+            break
+        end
+        total = total or tonumber(d.total)
+        for _, r in ipairs(d.diff) do
+            local code, name = str(r.f12), str(r.f14)
+            if code then rows[#rows + 1] = { code = code, name = name } end
+        end
+        if #rows >= (total or 0) or #d.diff == 0 then break end
+        sched_sleep(cfg_int('NET_PACE_MS', 200))
+    end
+    if #rows == 0 then return nil, tostring(last or 'empty board') end
+    return { board = board, count = total or #rows, rows = rows, host = host }
 end

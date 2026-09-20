@@ -68,6 +68,8 @@
 | `strategy.prefetch` | `POST /api/v1/strategy/prefetch` | `codes?` / `universe?` / `limit?`，`bars_days?`，`price_source?` | `{total, cached, fetched, failed, ms}`：把一组股票的日线抓到本地 |
 | `backtest.sweep` | `GET /api/v1/stocks/:code/backtest/sweep` | `horizon?`，`ma_days?`，`above_pct?`，`flat_max?`，`objective?`，`min_entries?`，`max_worst?` … | `Sweep`：一只股票上的参数网格 |
 | `strategy.sweep` | `GET /api/v1/strategy/sweep` | 同上，外加 `codes?` / `universe?` / `limit?` 与筛选条件 | `Sweep`：一组股票合在一起拟合 |
+| `strategy.attribute` | `GET /api/v1/strategy/attribute` | 同 scan，外加 `horizon?`，`min_signals?`，`group?` | 按行业/板块/地域分组，每组与自己的基准比 |
+| `groups.regions` | `GET /api/v1/groups/regions` | `refresh?`，`offline?` | 地域归属（31 个地域板块，约 5500 只），缓存 30 天 |
 | `strategy.scan` | `GET /api/v1/strategy/scan` | `ma_days?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |

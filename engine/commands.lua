@@ -732,6 +732,63 @@ local function install_strategy()
     })
 
     api_define({
+        name = 'strategy.attribute', method = 'GET', path = '/api/v1/strategy/attribute',
+        summary = '按行业、板块、地域分组看这条规则在哪里更有效（每组和自己的基准比）',
+        params = (function()
+            local p = strategy_params(false)
+            p.horizon = { type = 'integer', doc = '持有多少个交易日，默认 60' }
+            p.cooldown = { type = 'integer', doc = '两次信号之间的最小间隔，默认 20' }
+            p.min_signals = { type = 'integer', doc = '一组至少多少次信号才参与排名，默认 30' }
+            p.group = { type = 'string', enum = { 'industry', 'board', 'region' },
+                        doc = '只看某一种分组；默认三种都给' }
+            p.top = { type = 'integer', doc = '每种分组返回前后各几行，默认全给' }
+            return p
+        end)(),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.horizon and (p.horizon < 5 or p.horizon > 500) then
+                return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
+            end
+            if p.min_signals and (p.min_signals < 5 or p.min_signals > 100000) then
+                return nil, 'bad_request', 'min_signals 应在 5 到 100000 之间'
+            end
+            local opts = strategy_common(p)
+            opts.ma_days, opts.above_pct, opts.flat_max = p.ma_days, p.above_pct, p.flat_max
+            opts.horizon, opts.cooldown = p.horizon, p.cooldown
+            opts.min_signals, opts.group = p.min_signals, p.group
+            local res, ecode, emsg = strategy_attribute(opts)
+            if not res then return nil, ecode or 'internal', emsg or '分组归因失败' end
+            return res
+        end,
+    })
+
+    api_define({
+        name = 'groups.regions', method = 'GET', path = '/api/v1/groups/regions',
+        summary = '股票的地域归属（东方财富地域板块），首次会抓一次并缓存',
+        params = {
+            refresh = { type = 'boolean', doc = '强制重新抓取' },
+            offline = { type = 'boolean', doc = '只读缓存' },
+        },
+        handler = function(p)
+            local doc, ecode, emsg
+            if p.refresh then doc, ecode, emsg = groups_regions_refresh()
+            else doc, ecode, emsg = groups_regions({ offline = p.offline }) end
+            if not doc then return nil, ecode or 'upstream', emsg or '地域映射获取失败' end
+            local counts = {}
+            for _, region in pairs(doc.by_code or {}) do
+                counts[region] = (counts[region] or 0) + 1
+            end
+            local rows = {}
+            for region, n in pairs(counts) do rows[#rows + 1] = { region = region, stocks = n } end
+            table.sort(rows, function(a, b) return a.stocks > b.stocks end)
+            return { fetched_at = doc.fetched_at, regions = #rows, stocks = doc.stocks,
+                     rows = util_json_array(rows) }
+        end,
+    })
+
+    api_define({
         name = 'strategy.scan', method = 'GET', path = '/api/v1/strategy/scan',
         summary = '扫描现在正在发出信号的股票：均线走平后突破',
         params = strategy_params(false),

@@ -3,7 +3,8 @@
 -- Exports: report_markdown, report_money, report_pct,
 --          report_events_markdown, report_events_text,
 --          report_review_markdown, report_backtest_markdown,
---          report_review_brief, report_sweep_markdown, report_scan_markdown
+--          report_review_brief, report_sweep_markdown, report_scan_markdown,
+--          report_attribute_markdown
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -341,6 +342,62 @@ function g_exports.report_sweep_markdown(r)
             report_pct(x.worst, 1), x.hit_tp or 0, x.hit_sl or 0)
     end
     line()
+    for _, n in ipairs(r.notes or {}) do f('> %s', n) end
+    line()
+    return table.concat(L, '\n')
+end
+
+-- Attribution as Markdown. Every group against its own baseline, and the
+-- count of how many beat it — a list sorted by edge is only worth reading
+-- when that count is not half.
+function g_exports.report_attribute_markdown(r, top)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+    local p = r.params or {}
+    local NAME = { industry = '行业', board = '板块', region = '地域' }
+    top = top or 10
+
+    f('# 分组归因：%d 日均线走平 + 突破 %s', p.ma_days or 0, report_pct(p.above_pct, 1))
+    line()
+    f('%s %d 只股票，持有 %d 个交易日；一组至少 %d 次信号才参与排名',
+        r.universe or '—', r.stocks or 0, r.horizon or 0, r.min_signals or 0)
+    local sm = r.summary or {}
+    f('排名中的 %d 组里，有 **%d 组**的信号中位数高于自己的基准', sm.ranked or 0, sm.beat_own_baseline or 0)
+    line()
+
+    for _, g in ipairs(r.groups or {}) do
+        f('## 按%s', NAME[g.group] or g.group)
+        line()
+        if #(g.rows or {}) == 0 then
+            f('- 没有一组达到 %d 次信号（%d 组太薄）', r.min_signals or 0, g.thin or 0)
+        else
+            line('| ' .. (NAME[g.group] or g.group) ..
+                 ' | 股票 | 信号 | 胜率 | 中位数 | 本组基准 | **超额** | 胜率超额 |')
+            line('|---|---|---|---|---|---|---|---|')
+            local rows = g.rows
+            local shown = {}
+            for i = 1, math.min(top, #rows) do shown[#shown + 1] = rows[i] end
+            if #rows > top * 2 then shown[#shown + 1] = false end
+            for i = math.max(top + 1, #rows - top + 1), #rows do shown[#shown + 1] = rows[i] end
+            for _, x in ipairs(shown) do
+                if x == false then
+                    f('| … | | | | | | | |')
+                else
+                    f('| %s | %d | %d | %s | %s | %s | **%s** | %s |', x.label or x.value,
+                        x.stocks or 0, x.signals or 0, report_pct(x.win_rate, 0),
+                        report_pct(x.median, 1), report_pct(x.base_median, 1),
+                        x.edge and string.format('%+.1f%%', x.edge) or '—',
+                        x.edge_win and string.format('%+.0fpt', x.edge_win) or '—')
+                end
+            end
+            if (g.thin or 0) > 0 then
+                f('')
+                f('另有 %d 组信号太少，没有参与排名。', g.thin)
+            end
+        end
+        line()
+    end
     for _, n in ipairs(r.notes or {}) do f('> %s', n) end
     line()
     return table.concat(L, '\n')

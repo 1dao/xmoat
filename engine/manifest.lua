@@ -37,6 +37,7 @@ return {
     'engine/market.lua',     -- market_*    the whole market, and screening it
     'engine/review.lua',     -- review_*    the market's day: 大盘、结构、自选
     'engine/backtest.lua',   -- backtest_*  replay the engine's own signals
+    'engine/groups.lua',     -- groups_*    region and board membership
     'engine/strategy.lua',   -- strategy_*  one rule across many stocks
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)

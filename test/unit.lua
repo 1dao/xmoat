@@ -1323,6 +1323,28 @@ local function test_backtest()
     __net_set_transport(nil)
 end
 
+local function test_groups()
+    section('grouping')
+    local regions = { by_code = { ['600519'] = '贵州', ['000001'] = '广东' } }
+    local g = groups_of({ code = '600519', industry = '白酒Ⅱ' }, regions)
+    eq('the industry comes from the row', g.industry, '白酒Ⅱ')
+    eq('the board from the code', g.board, 'main')
+    eq('and the region from the map', g.region, '贵州')
+    eq('a code the map does not know has no region',
+        groups_of({ code = '300750' }, regions).region, nil)
+    eq('no map at all is not an error', groups_of({ code = '600519' }, nil).region, nil)
+    eq('the board of a ChiNext code', groups_of({ code = '300750' }, regions).board, 'gem')
+    eq('boards are labelled for people', groups_label('board', 'star'), '科创板')
+    eq('an industry is its own label', groups_label('industry', '白酒Ⅱ'), '白酒Ⅱ')
+
+    eq('a silly horizon is refused', api_call('strategy.attribute',
+        { universe = 'watchlist', horizon = 1 }).error.code, 'bad_request')
+    eq('and a silly signal threshold', api_call('strategy.attribute',
+        { universe = 'watchlist', min_signals = 1 }).error.code, 'bad_request')
+    eq('an unknown grouping is refused', api_call('strategy.attribute',
+        { universe = 'watchlist', group = 'sector' }).error.code, 'bad_request')
+end
+
 local function test_breakout()
     section('breakout after a flat average')
     -- Closes 1..10: the 5-day average at bar 5 is 3, at bar 10 it is 8.
@@ -1912,6 +1934,7 @@ local function run_all()
     test_review()
     test_backtest()
     test_breakout()
+    test_groups()
 end
 
 return {

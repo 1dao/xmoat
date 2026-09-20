@@ -54,6 +54,8 @@ local USAGE = [[
   prefetch [k=v ...]        批量抓日线备好本地，如 prefetch universe=market limit=500 bars_days=400
   fit [k=v ...]             在一组股票上一起拟合参数，如 fit universe=screen roe_min=15 limit=30
   scan [k=v ...]            扫描现在正在发信号的股票，如 scan universe=screen roe_min=15 limit=50
+  groups [k=v ...]          分组归因：这条规则在哪些行业/板块/地域更有效
+                            如 groups universe=market limit=6000 offline=true
   screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
   insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
   ask <代码> <问题>         就这只股票提问（会产生费用）
@@ -131,6 +133,16 @@ local function run()
         for i = 1, math.min(5, #(r.failed or {})) do
             out(string.format('  %s %s', r.failed[i].code, r.failed[i].error))
         end
+        return 0
+    elseif cmd == 'groups' then
+        local params = {}
+        for i = 2, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if k then params[k] = v end
+        end
+        local r = call('strategy.attribute', params)
+        if not r then return 1 end
+        out(report_attribute_markdown(r, tonumber(params.top) or 10))
         return 0
     elseif cmd == 'fit' or cmd == 'scan' then
         local params = {}
