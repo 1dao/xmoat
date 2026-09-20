@@ -45,6 +45,8 @@ end
 local STATUS = { pass = '✅', warn = '⚠️', na = '➖' }
 local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉',
                     check = '🔎', insight = '🧠', level = '📍', trend = '📈' }
+local REGIME = { bull = '多头（指数在上升的长期均线之上）', bear = '空头（指数在下降的长期均线之下）',
+                 range = '震荡（指数与长期均线方向不一致）', unknown = '未知' }
 local POSITION = { below = '低于', inside = '位于', above = '高于' }
 local METRIC_LABEL = { pe_ttm = 'PE(TTM)', pb = 'PB', ps_ttm = 'PS(TTM)', pcf_ttm = 'PCF(TTM)' }
 
@@ -271,6 +273,62 @@ end
 -- company names and dividend plans routinely contain.
 -- ---------------------------------------------------------------------------
 
+-- The review as a few lines, for a push message. The full three-part review
+-- is a page; a WeCom application message is 2,000 bytes, and nobody reads a
+-- page on a phone anyway. So this is the part that survives that cut: where
+-- the indices closed, what regime that is, how wide the move was, and — the
+-- only part that is about the reader — which held stocks touched a level.
+function g_exports.report_review_brief(r)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+    local m = r.market or {}
+
+    f('**收盘复盘 %s**', r.as_of or util_today())
+    -- Signed, because a market summary that says "0.94%" reads as a level.
+    local function signed(v, digits)
+        if not has(v) then return '—' end
+        return (v > 0 and '+' or '') .. report_pct(v, digits)
+    end
+    local ix = {}
+    for _, x in ipairs(m.indexes or {}) do
+        ix[#ix + 1] = string.format('%s %s %s', x.name or x.code, num(x.close),
+            signed(x.change_pct, 2))
+    end
+    if #ix > 0 then line(table.concat(ix, ' · ')) end
+    local rg, st = m.regime or {}, m.stance or {}
+    f('状态：%s%s', REGIME[rg.state] or '—',
+        st.position and st.position ~= '—' and string.format('，机械仓位 %s', st.position) or '')
+
+    local sct = r.structure or {}
+    local b = sct.breadth or {}
+    if b.total then
+        local tops = {}
+        for i = 1, math.min(3, #(sct.leaders or {})) do
+            tops[#tops + 1] = string.format('%s %s', sct.leaders[i].name,
+                signed(sct.leaders[i].change_pct, 1))
+        end
+        f('板块 %d 涨 / %d 跌%s', b.up or 0, b.down or 0,
+            #tops > 0 and ('，领涨 ' .. table.concat(tops, '、')) or '')
+    end
+
+    local w = r.watchlist or {}
+    local hits = {}
+    for _, x in ipairs(w.rows or {}) do
+        if #(x.flags or {}) > 0 then
+            hits[#hits + 1] = string.format('%s %s：%s', x.name or x.code,
+                signed(x.change_pct, 2), table.concat(x.flags, '、'))
+        end
+    end
+    if #hits > 0 then
+        line('自选点位提示：')
+        for _, s in ipairs(hits) do f('- %s', s) end
+    else
+        f('自选 %d 只，没有触及点位。', w.count or 0)
+    end
+    return table.concat(L, '\n')
+end
+
 -- A backtest result as Markdown. The baseline sits in the same table as the
 -- signal, column by column, because the two numbers only mean something next
 -- to each other.
@@ -332,9 +390,6 @@ function g_exports.report_backtest_markdown(r)
     line()
     return table.concat(L, '\n')
 end
-
-local REGIME = { bull = '多头（指数在上升的长期均线之上）', bear = '空头（指数在下降的长期均线之下）',
-                 range = '震荡（指数与长期均线方向不一致）', unknown = '未知' }
 
 -- The daily review as Markdown: the same three parts the object has.
 function g_exports.report_review_markdown(r)

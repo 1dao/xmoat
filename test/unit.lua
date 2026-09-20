@@ -783,6 +783,53 @@ local function test_alerts(evs)
     eq('a refused push stays pending', alerts_list({ limit = 1 })[1].pushed, false)
     alerts_flush(); alerts_flush()
     eq('three refusals give up', alerts_list({ limit = 1 })[1].pushed, 'failed')
+
+    -- The market review, in the same message rather than a second one.
+    local review = {
+        as_of = '2026-09-18',
+        market = {
+            indexes = { { code = '000300', name = '沪深300', close = 4507.39, change_pct = 1.06 } },
+            regime = { state = 'range' }, stance = { position = '50–80%' },
+        },
+        structure = { sector_count = 3, breadth = { up = 2, down = 1, flat = 0, total = 3 },
+                      leaders = { { name = '半导体设备', change_pct = 4.83 } }, laggards = {} },
+        watchlist = { count = 2, rows = {
+            { code = '600000', name = '测试银行股份', change_pct = -1.2, flags = { '跌破止损价' } },
+            { code = '600519', name = '别的股票', change_pct = 0.5, flags = {} } } },
+    }
+    local brief = report_review_brief(review)
+    check('the brief names the index and where it closed', brief:find('沪深300 4507.39', 1, true), brief)
+    check('and only the held stock that touched a level',
+        brief:find('跌破止损价', 1, true) and not brief:find('别的股票', 1, true), brief)
+    -- A WeCom application message is 2,000 bytes for everything, digest included.
+    check('short enough to push', #brief < 800, #brief)
+
+    sent = {}
+    __net_set_transport(function(url, opts)
+        sent[#sent + 1] = { url = url, body = util_json_decode(opts.body) }
+        return { status = 200, body = '{"errcode":0,"errmsg":"ok"}' }
+    end)
+    alerts_record({ { id = 'unit-c', code = '600000', name = '测试银行股份', kind = 'level',
+                      title = '跌破止损价', detail = '收盘 9.00，止损价 9.50' } })
+    local withr = alerts_flush({ review = review })
+    eq('the event went out', withr.sent, 1)
+    eq('and the review went with it', withr.review, true)
+    check('one message, not two', #sent == 1, #sent)
+    local body = sent[1].body.markdown.content
+    check('the digest has the alert', body:find('跌破止损价', 1, true), body)
+    check('and the review at the end', body:find('收盘复盘 2026-09-18', 1, true), body)
+
+    sent = {}
+    local quiet = alerts_flush({ review = review })
+    eq('nothing pending: the review alone is not pushed by default', #sent, 0)
+    eq('and nothing is claimed to have been sent', quiet.sent, 0)
+
+    local ritual = alerts_flush({ review = review, review_alone = true })
+    eq('unless asked for every trading day', #sent, 1)
+    eq('then it is the whole message', sent[1].body.markdown.content, brief)
+    eq('with nothing counted as an alert', ritual.sent, 0)
+    eq('but the review reported', ritual.review, true)
+
     __net_set_transport(nil)
     __notify_set_channels(nil)
 end

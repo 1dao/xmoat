@@ -441,7 +441,11 @@ type PushResult = {
 type RunResult = {
   refreshed: { code: string, ok: boolean, error?: { code: string, message: string } }[],
   new_events: number,
-  push: { sent: number, skipped?: boolean, busy?: boolean, channels: PushResult[] },
+  push: {
+    sent: number, skipped?: boolean, busy?: boolean,
+    review?: true,                          // 这条推送里带了收盘复盘
+    channels: PushResult[],
+  },
 }
 
 type ScheduleStatus = {

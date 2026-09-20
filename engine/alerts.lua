@@ -102,25 +102,46 @@ end
 --   { sent = n, channels = { {kind, name, ok, error}, ... }, skipped = bool }
 -- A flush already in progress makes this a no-op that says so; the running one
 -- will not see events recorded after it started, and the next flush will.
-function g_exports.alerts_flush()
+--
+-- opts = { review, review_alone }: the daily check hands in the market review
+-- so it rides along at the end of the digest rather than arriving as a second
+-- message. `review_alone` sends it even when nothing is pending, which is the
+-- difference between "tell me when something happened" and "tell me every
+-- trading day" — PUSH_REVIEW picks between them.
+function g_exports.alerts_flush(opts)
+    opts = opts or {}
     if flushing then return { sent = 0, busy = true, channels = util_json_array({}) } end
+    local brief = opts.review and report_review_brief(opts.review) or nil
     local pending = alerts_pending()
-    if #pending == 0 then return { sent = 0, channels = util_json_array({}) } end
+    if #pending == 0 and not (brief and opts.review_alone) then
+        return { sent = 0, channels = util_json_array({}) }
+    end
 
     if #notify_channels() == 0 then
         for _, e in ipairs(pending) do e.pushed = 'skipped' end
-        save()
+        if #pending > 0 then save() end
         return { sent = 0, skipped = true, channels = util_json_array({}) }
     end
 
     flushing = true
     local ok, result = pcall(function()
-        local msg = {
-            title = string.format('xmoat 提醒（%d 条）', #pending),
-            markdown = report_events_markdown(pending),
-            text = report_events_text(pending),
-            events = pending,
-        }
+        local msg
+        if #pending > 0 then
+            msg = {
+                title = string.format('xmoat 提醒（%d 条）', #pending),
+                markdown = report_events_markdown(pending),
+                text = report_events_text(pending),
+                events = pending,
+            }
+            if brief then
+                msg.markdown = msg.markdown .. '\n\n' .. brief
+                msg.text = msg.text .. '\n\n' .. brief
+            end
+        else
+            -- Nothing changed, but the review was asked for every trading day.
+            msg = { title = 'xmoat 收盘复盘 ' .. tostring(opts.review.as_of or util_today()),
+                    markdown = brief, text = brief, events = {} }
+        end
         local results = notify_send(msg)
         local delivered = false
         for _, r in ipairs(results) do delivered = delivered or r.ok end
@@ -133,8 +154,9 @@ function g_exports.alerts_flush()
                 if e.push_attempts >= MAX_ATTEMPTS then e.pushed = 'failed' end
             end
         end
-        save()
-        return { sent = delivered and #pending or 0, channels = util_json_array(results) }
+        if #pending > 0 then save() end
+        return { sent = delivered and #pending or 0, review = brief ~= nil or nil,
+                 channels = util_json_array(results) }
     end)
     flushing = false
     if not ok then
@@ -194,11 +216,22 @@ function g_exports.alerts_run()
             end
         end
 
+        -- The market review, so the check answers "what happened today" and
+        -- not only "what changed about your stocks". Never allowed to break
+        -- the push: a failed review is a missing tail, not a missing digest.
+        local mode = cfg_get('PUSH_REVIEW', 'digest')
+        local review
+        if mode == 'digest' or mode == 'always' then
+            local rok, r = pcall(review_build, {})
+            if rok and type(r) == 'table' then review = r
+            else cfg_log_warn('review for the digest failed: %s', tostring(r)) end
+        end
+
         -- A background flush started by an earlier refresh may still be
         -- sending; it cannot see what this run recorded, and flushing now
         -- would only report busy and leave those alerts for tomorrow's check.
         sched_wait_until(function() return not flushing end, 120000)
-        local push = alerts_flush()
+        local push = alerts_flush({ review = review, review_alone = mode == 'always' })
         return { refreshed = util_json_array(refreshed), new_events = doc.seq - seq_before, push = push }
     end)
     running = false
