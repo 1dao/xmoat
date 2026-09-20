@@ -84,6 +84,36 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   the AES key are the credential — and it drops every event it receives. The
   vector in `test/unit.lua` is Tencent's own WXBizMsgCrypt sample.
 
+## Positions, and the alerts they unlock
+
+- A watchlist entry may carry `position = { shares?, cost?, since }`. It means
+  "I own this" and it is the SWITCH for the `level` and `trend` events: with
+  no position those two kinds are never produced, not produced and filtered.
+  A price alert on something merely watched is noise; on something owned a
+  broken stop is the one message worth a buzz.
+- `events_diff` builds both sides with the same watch entry AND the bars up to
+  each side's own day (`quotes_upto`). Judging yesterday's close against
+  today's moving average invents crossings that never happened.
+- The engine never writes a position itself: no broker connection, no way to
+  know what was bought.
+- `alerts_flush(opts)` takes `{ review, review_alone }`. The daily check hands
+  in the market review so it rides along at the end of the digest rather than
+  arriving as a second message; `PUSH_REVIEW` (digest | always | off) picks
+  whether a quiet day still sends one. `report_review_brief` is the few-line
+  form — a WeCom app message is 2,000 bytes for everything.
+
+## The trading calendar
+
+- `engine/calendar.lua` answers "could there be new data yet" BEFORE any TTL
+  is consulted (`quote_is_stale`, `review_sectors`). No holiday table: a bar
+  for day D exists only after D's close, weekends are skipped outright, and a
+  holiday is discovered — a check after that close that finds the same last
+  day moves the next check on, so a week-long holiday costs one request.
+- A bar dated today before today's close is still moving, so the age limit
+  decides; one taken mid-session is refetched after the close.
+- The days that DID trade are the dates in the cached index series, not a
+  weekday guess: `calendar_is_trading_day` returns nil outside that range.
+
 ## Prices, technicals, levels, backtest
 
 - `engine/quote.lua` caches daily bars per security (`data/quotes/<code>.json`,
