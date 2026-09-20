@@ -572,6 +572,116 @@ local function install_sweep()
     })
 end
 
+-- The grid axes and the rule's own numbers, shared by the two strategy
+-- commands so they cannot drift apart.
+local function strategy_params(with_grid)
+    local p = {
+        codes = { type = 'string', doc = '股票代码，逗号分隔；给了就用它，不看 universe' },
+        universe = { type = 'string', enum = { 'watchlist', 'screen' },
+                     doc = '默认 watchlist；screen 用全市场快照按下面的条件筛' },
+        limit = { type = 'integer', doc = '最多看多少只，默认 50，最多 200' },
+        roe_min = { type = 'number', doc = 'universe=screen 时的筛选条件' },
+        pe_max = { type = 'number' }, pb_max = { type = 'number' },
+        cap_min = { type = 'number', doc = '总市值下限（亿元）' },
+        industry = { type = 'string' },
+        include_st = { type = 'boolean' },
+        flat_lookback = { type = 'integer', doc = '用多少个交易日判断走平，默认 25' },
+        min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0' },
+        offline = { type = 'boolean', doc = '只用本地行情缓存，不联网' },
+    }
+    if with_grid then
+        p.horizon = { type = 'integer', doc = '按持有多少个交易日排名，默认 60' }
+        p.ma_days = { type = 'string', doc = '均线窗口，逗号分隔，默认 30,40,50,60,70' }
+        p.above_pct = { type = 'string', doc = '高出均线的幅度 %，逗号分隔，默认 3,4,5,6,7,8,10' }
+        p.flat_max = { type = 'string', doc = '走平容忍度 %，逗号分隔，默认 1,2,3' }
+        p.cooldown = { type = 'integer', doc = '两次信号之间的最小间隔，默认 20' }
+        p.take_profit = { type = 'number', doc = '止盈 %，默认 20' }
+        p.stop_loss = { type = 'number', doc = '止损 %，默认 10' }
+        p.objective = { type = 'string', enum = { 'median', 'avg', 'win_rate' }, doc = '默认 median' }
+        p.min_entries = { type = 'integer', doc = '至少触发多少次才算数，默认 10' }
+        p.min_win_rate = { type = 'number', doc = '胜率下限 %' }
+        p.max_worst = { type = 'number', doc = '最差一笔的下限 %，如 -15' }
+        p.max_sl = { type = 'integer', doc = '先到止损的次数上限' }
+    else
+        p.ma_days = { type = 'integer', doc = '均线窗口，默认 50（约 10 周）' }
+        p.above_pct = { type = 'number', doc = '高出均线的幅度 %，默认 6' }
+        p.flat_max = { type = 'number', doc = '走平容忍度 %，默认 2' }
+        p.days = { type = 'integer', doc = '最近几个交易日内出现的信号都算，默认 1' }
+    end
+    return p
+end
+
+-- codes / screen filters, shared too.
+local function strategy_common(p)
+    local codes
+    if p.codes then
+        codes = {}
+        for c in tostring(p.codes):gmatch('[^,%s]+') do codes[#codes + 1] = c end
+        if #codes == 0 then codes = nil end
+    end
+    return {
+        codes = codes, universe = p.universe, limit = p.limit,
+        filters = { roe_min = p.roe_min, pe_max = p.pe_max, pb_max = p.pb_max,
+                    cap_min = p.cap_min, industry = p.industry, include_st = p.include_st,
+                    sort = 'roe', order = 'desc' },
+        flat_lookback = p.flat_lookback, min_day_gain = p.min_day_gain,
+        offline = p.offline,
+    }
+end
+
+local function install_strategy()
+    api_define({
+        name = 'strategy.sweep', method = 'GET', path = '/api/v1/strategy/sweep',
+        summary = '在一组股票上一起拟合参数：均线走平后突破，哪组窗口与幅度最好',
+        params = strategy_params(true),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 200) then
+                return nil, 'bad_request', 'limit 应在 1 到 200 之间'
+            end
+            if p.horizon and (p.horizon < 5 or p.horizon > 500) then
+                return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
+            end
+            local mas, merr = number_list(p.ma_days, 'ma_days', 2, 500)
+            if merr then return nil, 'bad_request', merr end
+            local aboves, aerr = number_list(p.above_pct, 'above_pct', 0, 100)
+            if aerr then return nil, 'bad_request', aerr end
+            local flats, ferr = number_list(p.flat_max, 'flat_max', 0, 50)
+            if ferr then return nil, 'bad_request', ferr end
+            local opts = strategy_common(p)
+            opts.horizon, opts.ma_days, opts.above_pct, opts.flat_max = p.horizon, mas, aboves, flats
+            opts.cooldown, opts.take_profit, opts.stop_loss = p.cooldown, p.take_profit, p.stop_loss
+            opts.objective, opts.min_entries = p.objective, p.min_entries
+            opts.min_win_rate, opts.max_worst, opts.max_sl = p.min_win_rate, p.max_worst, p.max_sl
+            local res, ecode, emsg = strategy_sweep(opts)
+            if not res then return nil, ecode or 'internal', emsg or '网格回测失败' end
+            return res
+        end,
+    })
+
+    api_define({
+        name = 'strategy.scan', method = 'GET', path = '/api/v1/strategy/scan',
+        summary = '扫描现在正在发出信号的股票：均线走平后突破',
+        params = strategy_params(false),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 200) then
+                return nil, 'bad_request', 'limit 应在 1 到 200 之间'
+            end
+            if p.ma_days and (p.ma_days < 2 or p.ma_days > 500) then
+                return nil, 'bad_request', 'ma_days 应在 2 到 500 之间'
+            end
+            if p.days and (p.days < 1 or p.days > 20) then
+                return nil, 'bad_request', 'days 应在 1 到 20 之间'
+            end
+            local opts = strategy_common(p)
+            opts.ma_days, opts.above_pct, opts.flat_max = p.ma_days, p.above_pct, p.flat_max
+            opts.days = p.days
+            local res, ecode, emsg = strategy_scan(opts)
+            if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
+            return res
+        end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
     install_market()
@@ -579,6 +689,7 @@ function g_exports.commands_install()
     install_review()
     install_backtest()
     install_sweep()
+    install_strategy()
     install_watchlist()
     install_stock()
     install_alerts()

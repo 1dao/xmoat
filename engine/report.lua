@@ -3,7 +3,7 @@
 -- Exports: report_markdown, report_money, report_pct,
 --          report_events_markdown, report_events_text,
 --          report_review_markdown, report_backtest_markdown,
---          report_review_brief, report_sweep_markdown
+--          report_review_brief, report_sweep_markdown, report_scan_markdown
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -282,11 +282,18 @@ function g_exports.report_sweep_markdown(r)
     local function f(...) line(string.format(...)) end
     local OBJ = { median = '中位数收益', avg = '平均收益', win_rate = '胜率' }
 
-    f('# 参数网格 %s %s', r.code or '', r.name or '')
+    if r.stocks then
+        f('# 参数网格（%d 只股票一起拟合）', r.stocks)
+    else
+        f('# 参数网格 %s %s', r.code or '', r.name or '')
+    end
     line()
     f('信号：%s', r.signal_note or '')
-    f('区间 %s – %s（%d 个交易日）；按持有 %d 日的%s排名；走平用 %d 个交易日判断%s',
-        r.from or '—', r.to or '—', r.days or 0, r.horizon or 0,
+    f('%s；按持有 %d 日的%s排名；走平用 %d 个交易日判断%s',
+        r.stocks and string.format('%d 只股票（%s，%s – %s，共 %d 个交易日的数据）',
+            r.stocks, r.universe or '—', r.from or '—', r.to or '—', r.days or 0)
+            or string.format('区间 %s – %s（%d 个交易日）', r.from or '—', r.to or '—', r.days or 0),
+        r.horizon or 0,
         OBJ[r.objective] or r.objective, r.flat_lookback or 0,
         (r.min_day_gain or 0) > 0 and string.format('；当天涨幅需 ≥ %s', report_pct(r.min_day_gain, 1)) or '')
     local req = r.require_ or {}
@@ -335,6 +342,48 @@ function g_exports.report_sweep_markdown(r)
     end
     line()
     for _, n in ipairs(r.notes or {}) do f('> %s', n) end
+    line()
+    return table.concat(L, '\n')
+end
+
+-- A scan result as Markdown.
+function g_exports.report_scan_markdown(r)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+    local p = r.params or {}
+
+    f('# 信号扫描：%d 日均线走平 + 突破 %s', p.ma_days or 0, report_pct(p.above_pct, 1))
+    line()
+    f('范围：%s，看了 %d 只；走平容忍 %s（%d 个交易日内）；最近 %d 个交易日内的信号都算%s',
+        r.universe or '—', r.checked or 0, report_pct(p.flat_max, 1), p.flat_lookback or 0,
+        r.days or 1,
+        (p.min_day_gain or 0) > 0 and string.format('；当天涨幅需 ≥ %s', report_pct(p.min_day_gain, 1)) or '')
+    line()
+    if #(r.hits or {}) == 0 then
+        line('没有股票在发信号。')
+    else
+        line('| 代码 | 名称 | 日期 | 收盘 | 均线 | 高出 | 均线斜率 | 当日涨幅 | PE | ROE |')
+        line('|---|---|---|---|---|---|---|---|---|---|')
+        for _, x in ipairs(r.hits) do
+            f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
+                x.date, num(x.close), num(x.ma), report_pct(x.above, 1),
+                report_pct(x.slope, 1), report_pct(x.day_gain, 1),
+                num(x.pe_ttm, 1), report_pct(x.roe, 1))
+        end
+    end
+    line()
+    if #(r.skipped or {}) > 0 then
+        f('跳过 %d 只：%s', #r.skipped, (function()
+            local out = {}
+            for i = 1, math.min(5, #r.skipped) do
+                out[#out + 1] = r.skipped[i].code .. '（' .. tostring(r.skipped[i].reason) .. '）'
+            end
+            return table.concat(out, '、') .. (#r.skipped > 5 and ' …' or '')
+        end)())
+        line()
+    end
+    f('> %s', r.note or '')
     line()
     return table.concat(L, '\n')
 end

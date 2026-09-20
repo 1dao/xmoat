@@ -13,6 +13,8 @@ return {
     'engine/sched.lua',      -- sched_*     waiting on a coroutine
     'engine/net.lua',        -- net_*       outbound HTTP
     'engine/source_em.lua',  -- source_em_* Eastmoney
+    'engine/tdx.lua',        -- tdx_*       the 通达信 quote protocol
+    'engine/source_tdx.lua', -- source_tdx_* 通达信 bars, forward-adjusted here
     'engine/fin.lua',        -- fin_*       report series, TTM, statistics
     'engine/valuation.lua',  -- valuation_* percentiles, reverse DCF, bands
     'engine/dividend.lua',   -- dividend_*
@@ -35,6 +37,7 @@ return {
     'engine/market.lua',     -- market_*    the whole market, and screening it
     'engine/review.lua',     -- review_*    the market's day: 大盘、结构、自选
     'engine/backtest.lua',   -- backtest_*  replay the engine's own signals
+    'engine/strategy.lua',   -- strategy_*  one rule across many stocks
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry

@@ -21,6 +21,18 @@
 --
 -- An INDEX is the same data under another name: 'idx:000001' is the Shanghai
 -- Composite. It is cached the same way, which is what the market review reads.
+--
+-- TWO SOURCES, and a cache remembers which one filled it.
+--   em   Eastmoney's JSON: forward-adjusted by the source, and the only one
+--        that carries the turnover rate, which the chip distribution needs.
+--        Half a megabyte per stock, and the server starts refusing after a
+--        couple of dozen in a row.
+--   tdx  the 通达信 protocol (engine/tdx.lua): 14 KB of binary per stock over
+--        a connection that stays open, adjusted by us from the ex-rights
+--        records, no turnover rate.
+-- A watched stock is therefore always filled from Eastmoney, and a wide scan
+-- from TDX. Asking for a source the cache was not filled with refetches the
+-- whole series rather than splicing two of them together.
 
 local OVERLAP_DAYS = 10          -- calendar days re-fetched to catch adjustment
 local DRIFT = 0.002              -- 0.2%: rounding differs, an adjustment does not
@@ -104,7 +116,9 @@ end
 -- COROUTINE-ONLY. Fetch the days that are missing and store the result.
 -- Returns the document, or nil plus (error code, message).
 --
--- opts = { full = true } forces the whole history rather than an extension.
+-- opts = { full = true } forces the whole history rather than an extension,
+-- and opts.source ('em' or 'tdx') which source to ask; the default is
+-- PRICE_SOURCE. A cache filled by the other one is replaced, not extended.
 function g_exports.quote_refresh(code, opts)
     opts = opts or {}
     local t, terr = quote_resolve(code)
@@ -120,11 +134,32 @@ function g_exports.quote_refresh(code, opts)
     local ok, doc, ecode, emsg = pcall(function()
         local old, lerr = store_load(t.key)
         if lerr then cfg_log_warn('%s: cached prices unreadable, refetching all: %s', t.key, lerr) end
-        local rows = (not opts.full) and old and type(old.rows) == 'table' and old.rows or {}
+        local source = opts.source or cfg_get('PRICE_SOURCE', 'em')
+        -- An index is Eastmoney's: TDX serves indices under its own codes and
+        -- the review only needs the four, so there is nothing to gain.
+        if t.kind == 'index' then source = 'em' end
+        local same_source = old and (old.source or 'em') == source
+        local rows = (not opts.full) and same_source and old and type(old.rows) == 'table'
+            and old.rows or {}
+        if old and not same_source then
+            cfg_log_info('%s: source changed to %s, refetching the whole series', t.key, source)
+        end
         local last = rows[#rows] and rows[#rows].date
 
-        local from = last and util_date_add_days(last, -OVERLAP_DAYS) or nil
-        local res, err = source_em_fetch_kline(t.sec, from)
+        local res, err
+        if source == 'tdx' then
+            -- TDX serves N bars back from the newest, so an extension asks for
+            -- the gap plus a little: there is no "since this date" form.
+            local want = cfg_int('QUOTE_MAX_DAYS', 1200)
+            if last then
+                local gap = util_date_diff_days(last, util_today()) or 0
+                want = math.min(want, math.max(20, math.floor(gap * 0.75) + OVERLAP_DAYS))
+            end
+            res, err = source_tdx_fetch_kline(t.sec, want)
+        else
+            local from = last and util_date_add_days(last, -OVERLAP_DAYS) or nil
+            res, err = source_em_fetch_kline(t.sec, from)
+        end
         if not res then return nil, 'upstream', '行情获取失败：' .. tostring(err) end
         if #res.rows == 0 and #rows == 0 then
             return nil, 'not_found', tostring(code) .. ' 没有行情数据'
@@ -134,7 +169,12 @@ function g_exports.quote_refresh(code, opts)
         if drifted then
             -- Forward adjustment changed: everything held is on the old basis.
             cfg_log_info('%s: adjustment changed, refetching the whole series', t.key)
-            local all, aerr = source_em_fetch_kline(t.sec, nil)
+            local all, aerr
+            if source == 'tdx' then
+                all, aerr = source_tdx_fetch_kline(t.sec, cfg_int('QUOTE_MAX_DAYS', 1200))
+            else
+                all, aerr = source_em_fetch_kline(t.sec, nil)
+            end
             if not all then return nil, 'upstream', '重新抓取全部行情失败：' .. tostring(aerr) end
             merged = all.rows
             res.name = all.name or res.name
@@ -154,7 +194,7 @@ function g_exports.quote_refresh(code, opts)
             version = 1,
             code = t.sec.code, kind = t.kind,
             name = res.name or (old and old.name),
-            adjust = 'qfq',
+            adjust = 'qfq', source = source,
             fetched_at = util_now_iso(),
             first_date = merged[1] and merged[1].date,
             last_date = merged[#merged] and merged[#merged].date,
@@ -162,8 +202,8 @@ function g_exports.quote_refresh(code, opts)
         }
         local sok, swerr = store_save(t.key, doc2)
         if not sok then return nil, 'internal', '保存行情失败：' .. tostring(swerr) end
-        cfg_log_info('%s %s prices: %d days to %s%s', t.key, tostring(doc2.name),
-            #merged, tostring(doc2.last_date), drifted and ' (refetched)' or '')
+        cfg_log_info('%s %s prices from %s: %d days to %s%s', t.key, tostring(doc2.name),
+            source, #merged, tostring(doc2.last_date), drifted and ' (refetched)' or '')
         return doc2
     end)
     inflight[t.key] = nil
@@ -202,6 +242,7 @@ function g_exports.quote_status(code)
     local doc = quote_load(code)
     if not doc then return nil end
     return { code = doc.code, kind = doc.kind, name = doc.name, adjust = doc.adjust,
+             source = doc.source or 'em',
              fetched_at = doc.fetched_at, first_date = doc.first_date,
              last_date = doc.last_date, days = #(doc.rows or {}),
              stale = quote_is_stale(doc) }
@@ -216,6 +257,7 @@ function g_exports.quote_view(doc, days)
         for i = math.max(1, #rows - days + 1), #rows do out[#out + 1] = rows[i] end
     end
     return { code = doc.code, kind = doc.kind, name = doc.name, adjust = doc.adjust,
+             source = doc.source or 'em',
              fetched_at = doc.fetched_at, first_date = doc.first_date,
              last_date = doc.last_date, days = #rows, rows = util_json_array(out) }
 end

@@ -38,6 +38,9 @@ end
 
 function g_exports.engine_stop()
     if not started then return end
+    -- The quote connections outlive any single call, so they are closed here
+    -- rather than by whoever opened them.
+    tdx_shutdown()
     schedule_stop()
     sched_stop()
     started = false

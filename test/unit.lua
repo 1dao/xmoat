@@ -1088,6 +1088,93 @@ local function test_calendar()
     __net_set_transport(nil)
 end
 
+local function hex_of(str)
+    return (str:gsub('.', function(c) return string.format('%02x', c:byte()) end))
+end
+
+local function test_tdx()
+    section('通达信 protocol')
+    -- The request frame, byte for byte against the reference implementation's
+    -- own documented example: daily bars, market 0, 000001, start 0, count 10.
+    local pkg = tdx_frame(0x052d,
+        string.pack('<I2c6I2I2I2I2I4I4I2', 0, '000001', 9, 1, 0, 10, 0, 0, 0), 0x01016408)
+    eq('a request is the reference bytes', hex_of(pkg),
+        '0c01086401011c001c002d0500003030303030310900010000000a0000000000000000000000')
+
+    -- A response frame: 16-byte header, then the body, then whatever came
+    -- after it. Sizes equal means it was not compressed.
+    local frame = string.pack('<I4BI4BI2I2I2', 0x0074cbb1, 0x0c, 0, 1, 0x052d, 2, 2) .. 'hi' .. 'left'
+    local msg, body, rest = tdx_take_frame(frame)
+    eq('a frame knows which message it answers', msg, 0x052d)
+    eq('and hands back its body', body, 'hi')
+    eq('leaving the rest of the buffer alone', rest, 'left')
+    eq('half a frame is not a frame', (tdx_take_frame(frame:sub(1, 12))), nil)
+    eq('nor is a frame whose body has not all arrived',
+        (tdx_take_frame(frame:sub(1, 17))), nil)
+
+    -- The price varint: six bits, a sign at 0x40, 0x80 to continue.
+    eq('a small price is six bits', (tdx_price_at(string.char(0x2b), 1)), 43)
+    eq('0x40 is the sign', (tdx_price_at(string.char(0x6b), 1)), -43)
+    -- 1 + (2 << 6) = 129.
+    eq('0x80 carries on into the next byte',
+        (tdx_price_at(string.char(0x81, 0x02), 1)), 129)
+    local _, after = tdx_price_at(string.char(0x81, 0x02), 1)
+    eq('and the position moves past both bytes', after, 3)
+
+    -- Eight real bars of 600519, recorded from a quote server. The same days
+    -- are in the Eastmoney fixture, which is what makes this a cross-check:
+    -- 2026-09-09 closed at 1290.88 on 32,226 手 in both.
+    local raw = assert(util_file_read('test/fixtures/tdx_bars_600519.bin'), 'missing tdx fixture')
+    local rows = assert(tdx_parse_bars(raw))
+    eq('every recorded bar is decoded', #rows, 8)
+    eq('oldest first', rows[1].date, '2026-09-09')
+    near('the close is thousandths of a yuan', rows[1].close, 1290.88, 0.001)
+    near('the open', rows[1].open, 1305.01, 0.001)
+    near('the high', rows[1].high, 1309.30, 0.001)
+    near('the low', rows[1].low, 1286.68, 0.001)
+    near('and the volume comes out of TDX own float', rows[1].volume, 32226, 0.5)
+    eq('to the newest bar', rows[8].date, '2026-09-18')
+    near('which closed where Eastmoney says it did', rows[8].close, 1257.12, 0.001)
+    -- That float is approximate at this magnitude, which is fine for a
+    -- turnover figure and would not be for a price.
+    check('the turnover is within a rounding of 31 亿',
+        math.abs(rows[8].amount - 3135849216) / 3135849216 < 1e-5, rows[8].amount)
+    check('a truncated body is refused, not half-read',
+        (tdx_parse_bars(raw:sub(1, 20))) == nil)
+
+    eq('Shanghai is market 1', tdx_market_of('600519'), 1)
+    eq('the STAR market too', tdx_market_of('688981'), 1)
+    eq('Shenzhen is 0', tdx_market_of('000001'), 0)
+    eq('ChiNext too', tdx_market_of('300750'), 0)
+    eq('Beijing is 2', tdx_market_of('830799'), 2)
+
+    -- The forward adjustment. A 10 派 10 元 dividend is one yuan a share, so
+    -- every price before the ex-date drops by one.
+    local bars = {
+        { date = '2026-01-05', open = 11, high = 11, low = 11, close = 11 },
+        { date = '2026-01-06', open = 10, high = 10, low = 10, close = 10 },
+        { date = '2026-01-07', open = 10.5, high = 10.5, low = 10.5, close = 10.5 },
+    }
+    local adj = source_tdx_adjust(bars, { { date = '2026-01-06', bonus = 10, rights_price = 0,
+                                            shares = 0, rights = 0 } })
+    near('prices before the ex-date lose the dividend', adj[1].close, 10, 1e-9)
+    near('the ex-date itself is untouched', adj[2].close, 10, 1e-9)
+    near('and so is everything after it', adj[3].close, 10.5, 1e-9)
+    eq('the original rows are not modified', bars[1].close, 11)
+    -- Across that day the holder was flat, and the adjusted change says so.
+    near('the daily change is measured on adjusted closes', adj[2].change_pct, 0, 1e-9)
+
+    -- 10 送 10: the share count doubles, so every earlier price halves.
+    local split = source_tdx_adjust(bars, { { date = '2026-01-06', bonus = 0, rights_price = 0,
+                                              shares = 10, rights = 0 } })
+    near('a ten-for-ten bonus halves the prices before it', split[1].close, 5.5, 1e-9)
+    -- A record with nothing in it must not divide anything by anything.
+    local none = source_tdx_adjust(bars, { { date = '2026-01-06', bonus = 0, rights_price = 0,
+                                             shares = 0, rights = 0 } })
+    near('an empty record changes nothing', none[1].close, 11, 1e-9)
+    eq('no events, no change', source_tdx_adjust(bars, {})[1].close, 11)
+end
+
 local function test_quote()
     section('daily prices')
     local k = source_em_parse_kline(fixture('em_kline_600519.json'))
@@ -1797,6 +1884,7 @@ local function run_all()
     test_insurer()
     test_broker()
     test_market()
+    test_tdx()
     test_quote()
     test_calendar()
     test_tech()

@@ -48,8 +48,10 @@ local USAGE = [[
   market-refresh            抓取全市场快照（约 15 次请求）
   review [offline]          当日复盘：大盘与 regime、板块结构、自选表现
   backtest <代码> [信号]    在这只股票的历史上回放信号：value/trend/value_trend/band/breakout
-  sweep <代码> [k=v ...]    参数网格：均线走平后突破，哪组窗口和幅度最好
+  sweep <代码> [k=v ...]    参数网格（单只股票）：均线走平后突破，哪组窗口和幅度最好
                             如 sweep 600519 horizon=60 max_worst=-15 min_entries=15
+  fit [k=v ...]             在一组股票上一起拟合参数，如 fit universe=screen roe_min=15 limit=30
+  scan [k=v ...]            扫描现在正在发信号的股票，如 scan universe=screen roe_min=15 limit=50
   screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
   insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
   ask <代码> <问题>         就这只股票提问（会产生费用）
@@ -95,6 +97,16 @@ local function run()
         local r = call('review.daily', { offline = args[2] == 'offline' })
         if not r then return 1 end
         out(report_review_markdown(r))
+        return 0
+    elseif cmd == 'fit' or cmd == 'scan' then
+        local params = {}
+        for i = 2, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if k then params[k] = v end
+        end
+        local r = call(cmd == 'fit' and 'strategy.sweep' or 'strategy.scan', params)
+        if not r then return 1 end
+        out(cmd == 'fit' and report_sweep_markdown(r) or report_scan_markdown(r))
         return 0
     elseif cmd == 'sweep' then
         if not args[2] then err(USAGE); return 2 end

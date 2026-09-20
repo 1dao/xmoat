@@ -163,7 +163,9 @@ function g_exports.stock_refresh(code)
         -- the series is cached, and nothing above depends on it, so a failure
         -- is logged and the refresh goes on.
         pace()
-        local qdoc, _, qerr = quote_refresh(code)
+        -- Eastmoney, whatever PRICE_SOURCE says: a watched stock's technical
+        -- section wants the turnover rate, and only that source carries it.
+        local qdoc, _, qerr = quote_refresh(code, { source = 'em' })
         if not qdoc then cfg_log_warn('%s: price refresh failed: %s', code, tostring(qerr)) end
 
         -- Business breakdown and the management review. Not needed by any
