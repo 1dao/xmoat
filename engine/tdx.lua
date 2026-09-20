@@ -216,6 +216,7 @@ end
 
 local pool = {}            -- every session this process has opened
 local preferred = nil      -- the server that answered last, tried first
+local next_server = 0      -- round robin, so 32 connections are not 32 on one host
 
 local function raw_call(s, pkg, want_msg, timeout_ms)
     local ok, err = s.conn:send_raw(pkg)
@@ -272,7 +273,7 @@ function g_exports.tdx_acquire()
     for _, s in ipairs(pool) do
         if not s.busy and not s.closed then s.busy = true; return s end
     end
-    local max = cfg_int('TDX_CONNECTIONS', 4)
+    local max = cfg_int('TDX_CONNECTIONS', 32)
     local live = 0
     for _, s in ipairs(pool) do if not s.closed then live = live + 1 end end
     if live >= max then
@@ -288,9 +289,20 @@ function g_exports.tdx_acquire()
         return nil, '没有空闲的行情连接'
     end
 
+    -- Spread the connections over the hosts in turn. Thirty-two sockets from
+    -- one address to one server is the shape of something a firewall blocks;
+    -- the same thirty-two over five servers is a handful each, which is what a
+    -- room full of desktop clients looks like anyway.
     local servers, errs = tdx_servers(), {}
-    if preferred then table.insert(servers, 1, preferred) end
-    for _, server in ipairs(servers) do
+    if #servers == 0 then return nil, '没有配置行情服务器（TDX_SERVERS）' end
+    local order = {}
+    for i = 1, #servers do
+        next_server = next_server % #servers + 1
+        order[#order + 1] = servers[next_server]
+    end
+    -- The one that answered last still gets tried first when nothing is open.
+    if preferred and #pool == 0 then table.insert(order, 1, preferred) end
+    for _, server in ipairs(order) do
         local s, err = open_session(server)
         if s then
             preferred = server
@@ -374,7 +386,7 @@ function g_exports.tdx_status()
         if not s.closed then open = open + 1 end
         if s.busy then busy = busy + 1 end
     end
-    return { open = open, busy = busy, max = cfg_int('TDX_CONNECTIONS', 4),
+    return { open = open, busy = busy, max = cfg_int('TDX_CONNECTIONS', 32),
              server = preferred and (preferred.host .. ':' .. preferred.port) or nil,
              servers = #tdx_servers() }
 end

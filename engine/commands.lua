@@ -618,6 +618,8 @@ local function strategy_params(with_grid)
                      doc = '默认 watchlist；screen 按下面的条件筛；market 是全市场每一只' },
         limit = { type = 'integer', doc = '最多看多少只，默认 30；universe=market 时可到 6000（全市场）' },
         bars_days = { type = 'integer', doc = '每只股票抓多少个交易日，默认按 QUOTE_MAX_DAYS' },
+        force = { type = 'boolean', doc = '忽略缓存，重新抓一遍' },
+        workers = { type = 'integer', doc = '并发连接数，默认 TDX_CONNECTIONS' },
         roe_min = { type = 'number', doc = 'universe=screen 时的筛选条件' },
         pe_max = { type = 'number' }, pb_max = { type = 'number' },
         cap_min = { type = 'number', doc = '总市值下限（亿元）' },
@@ -721,7 +723,7 @@ local function install_strategy()
             local t0 = util_now_ms()
             local res = quote_prefetch(codes, {
                 source = p.price_source or cfg_get('STRATEGY_PRICE_SOURCE', 'tdx'),
-                max_days = p.bars_days,
+                max_days = p.bars_days, force = p.force, workers = p.workers,
             })
             res.ms = util_now_ms() - t0
             res.universe = kind

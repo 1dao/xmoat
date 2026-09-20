@@ -254,8 +254,10 @@ function g_exports.quote_prefetch(codes, opts)
     local source = opts.source or cfg_get('PRICE_SOURCE', 'em')
     -- Eastmoney is fetched one at a time whatever the caller asks: parallel
     -- HTTPS is exactly what makes it start refusing.
+    -- One worker per connection. The ceiling is the connection pool's own:
+    -- more workers than sockets would just queue inside tdx_acquire.
     local workers = source == 'tdx' and math.max(1, math.min(opts.workers
-        or cfg_int('TDX_CONNECTIONS', 4), 8)) or 1
+        or cfg_int('TDX_CONNECTIONS', 32), 64)) or 1
 
     local queue, next_index = {}, 1
     for _, c in ipairs(codes or {}) do queue[#queue + 1] = c end
