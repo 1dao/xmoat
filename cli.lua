@@ -47,7 +47,9 @@ local USAGE = [[
   notify-test               向已配置的推送渠道发送测试消息
   market-refresh            抓取全市场快照（约 15 次请求）
   review [offline]          当日复盘：大盘与 regime、板块结构、自选表现
-  backtest <代码> [信号]    在这只股票的历史上回放信号：value/trend/value_trend/band
+  backtest <代码> [信号]    在这只股票的历史上回放信号：value/trend/value_trend/band/breakout
+  sweep <代码> [k=v ...]    参数网格：均线走平后突破，哪组窗口和幅度最好
+                            如 sweep 600519 horizon=60 max_worst=-15 min_entries=15
   screen [k=v ...]          筛选全市场，如 screen roe_min=15 pe_max=20 cap_min=100
   insight <代码> [refresh]  大模型解读；带 refresh 时重新生成（会产生费用）
   ask <代码> <问题>         就这只股票提问（会产生费用）
@@ -93,6 +95,17 @@ local function run()
         local r = call('review.daily', { offline = args[2] == 'offline' })
         if not r then return 1 end
         out(report_review_markdown(r))
+        return 0
+    elseif cmd == 'sweep' then
+        if not args[2] then err(USAGE); return 2 end
+        local params = { code = args[2] }
+        for i = 3, #args do
+            local k, v = args[i]:match('^([%w_]+)=(.*)$')
+            if k then params[k] = v end
+        end
+        local r = call('backtest.sweep', params)
+        if not r then return 1 end
+        out(report_sweep_markdown(r))
         return 0
     elseif cmd == 'backtest' then
         if not args[2] then err(USAGE); return 2 end

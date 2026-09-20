@@ -322,6 +322,23 @@ local function install_insight()
     })
 end
 
+-- A comma-separated list of numbers, as a grid axis arrives from a client.
+local function number_list(text, label, lo, hi)
+    if text == nil then return nil end
+    local out = {}
+    for part in tostring(text):gmatch('[^,%s]+') do
+        local v = tonumber(part)
+        if not v then return nil, label .. ' 里的 ' .. part .. ' 不是数字' end
+        if (lo and v < lo) or (hi and v > hi) then
+            return nil, string.format('%s 应在 %s 到 %s 之间', label, tostring(lo), tostring(hi))
+        end
+        out[#out + 1] = v
+    end
+    if #out == 0 then return nil, label .. ' 是空的' end
+    if #out > 20 then return nil, label .. ' 最多 20 个值' end
+    return out
+end
+
 local function install_backtest()
     api_define({
         name = 'backtest.run', method = 'GET', path = '/api/v1/stocks/:code/backtest',
@@ -503,12 +520,65 @@ local function install_market()
     })
 end
 
+local function install_sweep()
+    api_define({
+        name = 'backtest.sweep', method = 'GET', path = '/api/v1/stocks/:code/backtest/sweep',
+        summary = '参数网格：均线走平后突破，哪一组窗口与幅度在这只股票的历史上最好',
+        params = {
+            code = code_param(),
+            horizon = { type = 'integer', doc = '按持有多少个交易日排名，默认 60' },
+            ma_days = { type = 'string', doc = '均线窗口（交易日），逗号分隔，默认 30,40,50,60,70' },
+            above_pct = { type = 'string', doc = '高出均线的幅度 %，逗号分隔，默认 3,4,5,6,7,8,10' },
+            flat_max = { type = 'string', doc = '走平容忍度 %，逗号分隔，默认 1,2,3' },
+            flat_lookback = { type = 'integer', doc = '用多少个交易日判断走平，默认 25' },
+            min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0（不要求）' },
+            cooldown = { type = 'integer', doc = '两次信号之间的最小间隔，默认 20' },
+            take_profit = { type = 'number', doc = '止盈 %，默认 20' },
+            stop_loss = { type = 'number', doc = '止损 %，默认 10' },
+            objective = { type = 'string', enum = { 'median', 'avg', 'win_rate' },
+                          doc = '按什么排名，默认 median（中位数收益）' },
+            min_entries = { type = 'integer', doc = '至少触发多少次才算数，默认 10' },
+            min_win_rate = { type = 'number', doc = '胜率下限 %' },
+            max_worst = { type = 'number', doc = '最差一笔的下限 %，如 -15' },
+            max_sl = { type = 'integer', doc = '先到止损的次数上限' },
+            offline = { type = 'boolean', doc = '只用本地行情缓存' },
+        },
+        handler = function(p)
+            local code, err = security_code(p.code)
+            if not code then return nil, 'bad_request', err end
+            if p.horizon and (p.horizon < 5 or p.horizon > 500) then
+                return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
+            end
+            if p.flat_lookback and (p.flat_lookback < 5 or p.flat_lookback > 250) then
+                return nil, 'bad_request', 'flat_lookback 应在 5 到 250 之间'
+            end
+            local mas, merr = number_list(p.ma_days, 'ma_days', 2, 500)
+            if merr then return nil, 'bad_request', merr end
+            local aboves, aerr = number_list(p.above_pct, 'above_pct', 0, 100)
+            if aerr then return nil, 'bad_request', aerr end
+            local flats, ferr = number_list(p.flat_max, 'flat_max', 0, 50)
+            if ferr then return nil, 'bad_request', ferr end
+            local res, ecode, emsg = backtest_sweep(code, {
+                horizon = p.horizon, ma_days = mas, above_pct = aboves, flat_max = flats,
+                flat_lookback = p.flat_lookback, min_day_gain = p.min_day_gain,
+                cooldown = p.cooldown, take_profit = p.take_profit, stop_loss = p.stop_loss,
+                objective = p.objective, min_entries = p.min_entries,
+                min_win_rate = p.min_win_rate, max_worst = p.max_worst, max_sl = p.max_sl,
+                offline = p.offline,
+            })
+            if not res then return nil, ecode or 'internal', emsg or '网格回测失败' end
+            return res
+        end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
     install_market()
     install_quote()
     install_review()
     install_backtest()
+    install_sweep()
     install_watchlist()
     install_stock()
     install_alerts()

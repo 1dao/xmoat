@@ -1,7 +1,9 @@
 -- engine/backtest.lua — what would have happened, on this stock's own history.
 --
 -- Exports: backtest_signals, backtest_horizons, backtest_barrier,
---          backtest_evaluate, backtest_run
+--          backtest_evaluate, backtest_run, backtest_breakout,
+--          backtest_ma_series, backtest_sweep, backtest_sweep_grid,
+--          backtest_sweep_rank, backtest_sweep_neighbours
 --
 -- WHAT IS BEING TESTED. Not a model's opinion and not a story: the engine's
 -- own rules, the ones that produce the levels. "The multiple is in the cheapest
@@ -32,9 +34,82 @@ local SIGNALS = {
     trend = '技术面：均线多头排列',
     value_trend = '两者同时满足：便宜，而且已经不再下跌',
     band = '你设置的合理区间：锚指标低于区间下沿',
+    breakout = '均线走平之后，股价放到均线上方一定幅度（默认 10 周均线 + 6%）',
 }
 
 g_exports.backtest_signal_list = SIGNALS
+
+-- A breakout rule reads prices and nothing else, so it needs no valuation
+-- history and is scanned over the bars directly.
+local PRICE_ONLY = { breakout = true }
+
+-- Ten weeks of trading days. A "10 周均线" on daily bars is this many closes;
+-- computing it on weekly bars instead would move the signal to Friday and lose
+-- four days of it, which is not what the rule means.
+g_exports.backtest_week_days = 5
+
+-- The moving average at every index, in one pass. The sweep asks for the same
+-- window again and again, so this is computed once per window length rather
+-- than per parameter combination.
+function g_exports.backtest_ma_series(px, n)
+    local out, sum = {}, 0
+    for i = 1, #px do
+        local c = util_num(px[i].close)
+        sum = sum + (c or 0)
+        if i > n then sum = sum - (util_num(px[i - n].close) or 0) end
+        if i >= n then out[i] = sum / n end
+    end
+    return out
+end
+
+-- The days the breakout rule fired, and why. Separate from backtest_signals
+-- because it is a different shape of question: no valuation, no expanding
+-- window, just the bars.
+--
+-- opts = {
+--   ma_days = 50,          -- the average's window; 50 is ten weeks
+--   flat_lookback = 25,    -- over how many days "flat" is judged (five weeks)
+--   flat_max = 2,          -- how much it may have moved in that time, %
+--   above_pct = 6,         -- how far above the average the close must be, %
+--   min_day_gain = 0,      -- and how much the day itself must have risen, %
+--   cooldown = 20,
+--   ma = <a prepared series>,
+-- }
+function g_exports.backtest_breakout(px, opts)
+    opts = opts or {}
+    px = px or {}
+    local n = opts.ma_days or 50
+    local look = opts.flat_lookback or 25
+    local flat_max = opts.flat_max or 2
+    local above = (opts.above_pct or 6) / 100
+    local day_gain = opts.min_day_gain or 0
+    local cooldown = opts.cooldown or 20
+
+    local ma = opts.ma or backtest_ma_series(px, n)
+    local entries, tested, last_fire = {}, 0, nil
+    for i = n + look, #px do
+        local now, before = ma[i], ma[i - look]
+        local close = util_num(px[i].close)
+        if now and before and close and before > 0 then
+            tested = tested + 1
+            -- Flat: the average has gone nowhere over the lookback. This is
+            -- the part that makes it a base and not a chase — the same 6%
+            -- above a rising average is just a stock that has been going up.
+            local slope = (now - before) / before * 100
+            local gain = util_num(px[i].change_pct) or 0
+            if math.abs(slope) <= flat_max and close >= now * (1 + above) and gain >= day_gain then
+                if not last_fire or (i - last_fire) >= cooldown then
+                    last_fire = i
+                    entries[#entries + 1] = { date = px[i].date, index = i, close = close,
+                                              ma = now, slope = slope,
+                                              above = (close - now) / now * 100,
+                                              day_gain = gain }
+                end
+            end
+        end
+    end
+    return { entries = entries, tested = tested }
+end
 
 -- Insert into a sorted array, keeping it sorted. The expanding percentile is
 -- the whole cost of this file, and rebuilding it each day would be quadratic
@@ -69,6 +144,7 @@ end
 function g_exports.backtest_signals(val, px, opts)
     opts = opts or {}
     local signal = opts.signal or 'value'
+    if PRICE_ONLY[signal] then return backtest_breakout(px, opts) end
     local metric = opts.metric or 'pe_ttm'
     local pctl = opts.percentile or 25
     local cooldown = opts.cooldown or 20
@@ -273,6 +349,214 @@ function g_exports.backtest_evaluate(val, px, opts)
     }
 end
 
+-- ---------------------------------------------------------------------------
+-- The parameter sweep
+--
+-- "Which window and which distance work best" is a fair question and a
+-- dangerous one. Run enough combinations over one stock's history and one of
+-- them will look excellent by accident — that is arithmetic, not insight. So
+-- this reports the whole grid rather than only its winner, and for the winner
+-- it also reports how its NEIGHBOURS did: a cell that is good while everything
+-- around it is bad was luck, and a plateau is a finding.
+--
+-- It also cannot promise "no losses". Every row carries its worst single
+-- outcome, and the constraint you set (`max_worst`, `min_win_rate`,
+-- `min_entries`) is what "safe enough" means here — a filter over the past,
+-- not a guarantee about the future.
+-- ---------------------------------------------------------------------------
+
+local SWEEP_MA = { 30, 40, 50, 60, 70 }
+local SWEEP_ABOVE = { 3, 4, 5, 6, 7, 8, 10 }
+local SWEEP_FLAT = { 1, 2, 3 }
+
+local OBJECTIVES = { median = true, avg = true, win_rate = true }
+
+local function list_or(v, default)
+    if type(v) ~= 'table' or #v == 0 then return default end
+    return v
+end
+
+-- px: the daily bars. opts:
+--   horizon = 60,           -- the holding period every row is ranked on
+--   ma_days / above_pct / flat_max = lists to try
+--   flat_lookback, min_day_gain, cooldown, take_profit, stop_loss
+-- Pure.
+function g_exports.backtest_sweep_grid(px, opts)
+    opts = opts or {}
+    local horizon = opts.horizon or 60
+    local mas = list_or(opts.ma_days, SWEEP_MA)
+    local aboves = list_or(opts.above_pct, SWEEP_ABOVE)
+    local flats = list_or(opts.flat_max, SWEEP_FLAT)
+    local look = opts.flat_lookback or 25
+
+    local rows = {}
+    for _, n in ipairs(mas) do
+        -- One pass per window, reused by every distance and flatness on it.
+        local ma = backtest_ma_series(px, n)
+        for _, flat in ipairs(flats) do
+            for _, above in ipairs(aboves) do
+                local found = backtest_breakout(px, {
+                    ma = ma, ma_days = n, flat_lookback = look, flat_max = flat,
+                    above_pct = above, min_day_gain = opts.min_day_gain,
+                    cooldown = opts.cooldown,
+                })
+                local hz = backtest_horizons(found.entries, px, { horizon })[1]
+                local barrier = backtest_barrier(found.entries, px, {
+                    take_profit = opts.take_profit, stop_loss = opts.stop_loss,
+                    horizon = opts.barrier_horizon or horizon,
+                })
+                rows[#rows + 1] = {
+                    ma_days = n, flat_max = flat, above_pct = above,
+                    entries = #found.entries,
+                    n = hz.n or 0, win_rate = hz.win_rate, avg = hz.avg,
+                    median = hz.median, best = hz.best, worst = hz.worst,
+                    hit_tp = barrier.hit_tp, hit_sl = barrier.hit_sl,
+                    barrier_win_rate = barrier.win_rate,
+                }
+            end
+        end
+    end
+    return rows
+end
+
+-- The rows that satisfy the constraints, best first.
+function g_exports.backtest_sweep_rank(rows, opts)
+    opts = opts or {}
+    local objective = OBJECTIVES[opts.objective or ''] and opts.objective or 'median'
+    local min_entries = opts.min_entries or 10
+    local kept = {}
+    for _, r in ipairs(rows) do
+        local ok = (r.n or 0) >= min_entries and r[objective] ~= nil
+        if ok and opts.min_win_rate and (r.win_rate or -1) < opts.min_win_rate then ok = false end
+        -- max_worst is a negative number: "no single signal lost more than".
+        if ok and opts.max_worst and (r.worst or -1e9) < opts.max_worst then ok = false end
+        if ok and opts.max_sl and (r.hit_sl or 0) > opts.max_sl then ok = false end
+        if ok then kept[#kept + 1] = r end
+    end
+    table.sort(kept, function(a, b)
+        if a[objective] == b[objective] then return (a.n or 0) > (b.n or 0) end
+        return a[objective] > b[objective]
+    end)
+    return kept, objective
+end
+
+-- How the cells around `best` did, on the same objective. The number that
+-- matters when deciding whether a result is real.
+function g_exports.backtest_sweep_neighbours(rows, best, objective)
+    if not best then return nil end
+    local mas, aboves, flats = {}, {}, {}
+    for _, r in ipairs(rows) do
+        mas[r.ma_days] = true; aboves[r.above_pct] = true; flats[r.flat_max] = true
+    end
+    local function sorted_keys(t)
+        local out = {}
+        for k in pairs(t) do out[#out + 1] = k end
+        table.sort(out)
+        return out
+    end
+    local function neighbours_of(values, v)
+        local keys, out = sorted_keys(values), {}
+        for i, k in ipairs(keys) do
+            if k == v then
+                if keys[i - 1] then out[#out + 1] = keys[i - 1] end
+                if keys[i + 1] then out[#out + 1] = keys[i + 1] end
+            end
+        end
+        return out
+    end
+    local want = {}
+    for _, n in ipairs(neighbours_of(mas, best.ma_days)) do
+        want[#want + 1] = { ma_days = n, above_pct = best.above_pct, flat_max = best.flat_max }
+    end
+    for _, a in ipairs(neighbours_of(aboves, best.above_pct)) do
+        want[#want + 1] = { ma_days = best.ma_days, above_pct = a, flat_max = best.flat_max }
+    end
+    for _, f in ipairs(neighbours_of(flats, best.flat_max)) do
+        want[#want + 1] = { ma_days = best.ma_days, above_pct = best.above_pct, flat_max = f }
+    end
+    local found, sum, count, worst = {}, 0, 0, nil
+    for _, w in ipairs(want) do
+        for _, r in ipairs(rows) do
+            if r.ma_days == w.ma_days and r.above_pct == w.above_pct and r.flat_max == w.flat_max then
+                found[#found + 1] = r
+                local v = r[objective]
+                if v then
+                    sum, count = sum + v, count + 1
+                    if not worst or v < worst then worst = v end
+                end
+            end
+        end
+    end
+    return { n = count, mean = count > 0 and sum / count or nil, worst = worst,
+             cells = util_json_array(found) }
+end
+
+-- COROUTINE-ONLY (it may fetch the bars). The whole sweep for one stock.
+function g_exports.backtest_sweep(code, opts)
+    opts = util_copy(opts)
+    local q, ecode, emsg = quote_series(code, { offline = opts.offline })
+    if not q or type(q.rows) ~= 'table' or #q.rows == 0 then
+        return nil, ecode or 'not_fetched', emsg or '没有日线数据，先调用 quote.refresh'
+    end
+    local px = q.rows
+    local horizon = opts.horizon or 60
+    if #px < horizon + 120 then
+        return nil, 'bad_request', string.format('日线只有 %d 个交易日，不够跑 %d 日持有期的网格',
+            #px, horizon)
+    end
+
+    local rows = backtest_sweep_grid(px, opts)
+    local kept, objective = backtest_sweep_rank(rows, opts)
+    local best = kept[1]
+
+    -- The same statistics for buying on any day of the same window, so a row
+    -- can be read as better or worse than doing nothing clever.
+    local first = (opts.ma_days and opts.ma_days[#opts.ma_days] or SWEEP_MA[#SWEEP_MA]) +
+                  (opts.flat_lookback or 25)
+    local base_entries = {}
+    for i = math.min(first, #px), #px do
+        base_entries[#base_entries + 1] = { index = i, date = px[i].date,
+                                            close = util_num(px[i].close) }
+    end
+    local bh = backtest_horizons(base_entries, px, { horizon })[1]
+
+    table.sort(rows, function(a, b)
+        if a.ma_days ~= b.ma_days then return a.ma_days < b.ma_days end
+        if a.flat_max ~= b.flat_max then return a.flat_max < b.flat_max end
+        return a.above_pct < b.above_pct
+    end)
+
+    return {
+        code = q.code, name = q.name,
+        signal = 'breakout', signal_note = SIGNALS.breakout,
+        from = px[1] and px[1].date, to = px[#px] and px[#px].date, days = #px,
+        horizon = horizon, objective = objective,
+        flat_lookback = opts.flat_lookback or 25,
+        min_day_gain = opts.min_day_gain or 0,
+        cooldown = opts.cooldown or 20,
+        require_ = { min_entries = opts.min_entries or 10, min_win_rate = opts.min_win_rate,
+                     max_worst = opts.max_worst, max_sl = opts.max_sl },
+        grid = util_json_array(rows),
+        ranked = util_json_array((function()
+            local out = {}
+            for i = 1, math.min(10, #kept) do out[#out + 1] = kept[i] end
+            return out
+        end)()),
+        best = best,
+        neighbours = backtest_sweep_neighbours(rows, best, objective),
+        baseline = { n = bh.n or 0, win_rate = bh.win_rate, avg = bh.avg,
+                     median = bh.median, worst = bh.worst },
+        notes = util_json_array({
+            '网格是在这一只股票的历史上跑的。跑得足够多，总有一组参数碰巧好看——所以这里给的是整张表，' ..
+            '以及最优那格周围几格的表现：邻居也好才说明是一片高地，孤峰就是运气。',
+            '没有哪组参数能"保证不亏损"。每一行都带着它最差的一笔，' ..
+            '你设的约束（最少触发次数、最低胜率、最差一笔的下限）就是这里"够安全"的定义——它是对过去的筛选，不是对未来的承诺。',
+            '基准是同一窗口里随便哪天买的同样统计；跑不赢它的参数，再好看也没有意义。',
+            '不含交易成本、滑点和停牌；价格用前复权。',
+        }),
+    }
+end
+
 -- COROUTINE-ONLY (it may fetch the price series). Returns the result, or nil
 -- plus (error code, message).
 function g_exports.backtest_run(code, opts)
@@ -281,7 +565,7 @@ function g_exports.backtest_run(code, opts)
     if lerr then return nil, 'internal', lerr end
     if not rec then return nil, 'not_fetched', tostring(code) .. ' 还没有获取过数据，先刷新' end
     local val = rec.valuation or {}
-    if #val < MIN_SAMPLE then
+    if not PRICE_ONLY[opts.signal or 'value'] and #val < MIN_SAMPLE then
         return nil, 'bad_request', string.format('估值历史只有 %d 个交易日，不足以回测', #val)
     end
 
@@ -292,6 +576,7 @@ function g_exports.backtest_run(code, opts)
 
     local watch = watch_get(code)
     opts.metric = opts.metric or levels_metric_for(rec.org_type or 'general', watch and watch.band)
+    if PRICE_ONLY[opts.signal or ''] then opts.metric = nil end
     if opts.signal == 'band' then
         local band = watch and watch.band
         if not band or band.metric ~= opts.metric or not util_num(band.low) then

@@ -1236,6 +1236,97 @@ local function test_backtest()
     __net_set_transport(nil)
 end
 
+local function test_breakout()
+    section('breakout after a flat average')
+    -- Closes 1..10: the 5-day average at bar 5 is 3, at bar 10 it is 8.
+    local ramp = {}
+    for i = 1, 10 do ramp[i] = { date = string.format('d%02d', i), close = i } end
+    local ma = backtest_ma_series(ramp, 5)
+    eq('the average starts once the window is full', ma[4], nil)
+    eq('and is the mean of the window', ma[5], 3)
+    eq('at the end too', ma[10], 8)
+
+    -- A hundred flat days, then one that jumps 7%. The average barely moves,
+    -- so it is flat, and the close is 7% above it.
+    local function flat_then(jump, day_gain)
+        local px = {}
+        for i = 1, 100 do
+            px[i] = { date = util_date_add_days('2024-01-01', i), close = 100,
+                      high = 100, low = 100, change_pct = 0 }
+        end
+        px[101] = { date = util_date_add_days('2024-01-01', 101), close = jump,
+                    high = jump, low = 99, change_pct = day_gain or (jump - 100) }
+        return px
+    end
+    local px = flat_then(107)
+    eq('a 7% break above a flat average fires', #backtest_breakout(px,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 1)
+    eq('the same break does not clear a 8% bar', #backtest_breakout(px,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 8 }).entries, 0)
+    local e = backtest_breakout(px, { ma_days = 50, flat_lookback = 25, flat_max = 2,
+                                      above_pct = 6 }).entries[1]
+    check('the entry says how far above it was', e.above > 6 and e.above < 7, e.above)
+    near('and how flat the average was', e.slope, 0, 0.3)
+
+    -- The same distance above a RISING average is not a base breaking, it is
+    -- a stock that has been going up: the flatness test is what separates them.
+    local rising = {}
+    for i = 1, 120 do
+        rising[i] = { date = util_date_add_days('2024-01-01', i), close = 100 * 1.01 ^ i,
+                      high = 100 * 1.01 ^ i, low = 100 * 1.01 ^ i, change_pct = 1 }
+    end
+    eq('a rising average never counts as flat', #backtest_breakout(rising,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 0)
+    check('unless the flatness test is switched off', #backtest_breakout(rising,
+        { ma_days = 50, flat_lookback = 25, flat_max = 100, above_pct = 6 }).entries > 0)
+
+    -- The day's own rise, for reading the rule the other way.
+    local quiet_break = flat_then(107, 0.5)
+    eq('a quiet drift over the line still fires by default', #backtest_breakout(quiet_break,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 1)
+    eq('but not when the day itself must have jumped', #backtest_breakout(quiet_break,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6, min_day_gain = 5 }).entries, 0)
+
+    -- The cooldown, on a series that stays above the line for days.
+    local sustained = {}
+    for i = 1, 100 do
+        sustained[i] = { date = util_date_add_days('2024-01-01', i), close = 100,
+                         high = 100, low = 100, change_pct = 0 }
+    end
+    for i = 101, 130 do
+        sustained[i] = { date = util_date_add_days('2024-01-01', i), close = 107,
+                         high = 107, low = 107, change_pct = 0 }
+    end
+    -- One signal, not thirty: the cooldown covers the first twenty days, and by
+    -- the time it expires the average itself has been pulled up — the base is
+    -- no longer flat, and a base breakout is over once the base has moved.
+    eq('a standing breakout is one signal', #backtest_breakout(sustained,
+        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6, cooldown = 20 }).entries, 1)
+
+    -- The grid, and what is done with it.
+    local rows = backtest_sweep_grid(sustained, { horizon = 5, ma_days = { 40, 50 },
+                                                  above_pct = { 4, 6 }, flat_max = { 2, 3 } })
+    eq('every combination is a row', #rows, 2 * 2 * 2)
+    local kept, objective = backtest_sweep_rank(rows, { min_entries = 1, objective = 'median' })
+    eq('ranking says what it ranked on', objective, 'median')
+    check('and keeps only what meets the constraints', #kept <= #rows)
+    eq('an impossible constraint keeps nothing',
+        #(backtest_sweep_rank(rows, { min_entries = 1, max_worst = 1000 })), 0)
+    local nb = backtest_sweep_neighbours(rows, kept[1], objective)
+    check('the winner is reported with its neighbours', nb and nb.n and nb.n >= 2, nb and nb.n)
+
+    -- Through the command path, on the recorded bars.
+    __net_set_transport(fixture_transport)
+    eq('a stock with too few bars is refused, not fudged',
+        api_call('backtest.sweep', { code = '600519' }).error.code, 'bad_request')
+    eq('a grid axis that is not numbers is refused',
+        api_call('backtest.sweep', { code = '600519', ma_days = '50,abc' }).error.code, 'bad_request')
+    eq('and one that is too long', api_call('backtest.sweep',
+        { code = '600519', above_pct = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21' })
+        .error.code, 'bad_request')
+    __net_set_transport(nil)
+end
+
 local function test_review()
     section('daily review')
     local sect = source_em_parse_sectors(fixture('em_sectors.json'))
@@ -1712,6 +1803,7 @@ local function run_all()
     test_levels()
     test_review()
     test_backtest()
+    test_breakout()
 end
 
 return {

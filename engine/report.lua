@@ -2,7 +2,8 @@
 --
 -- Exports: report_markdown, report_money, report_pct,
 --          report_events_markdown, report_events_text,
---          report_review_markdown, report_backtest_markdown
+--          report_review_markdown, report_backtest_markdown,
+--          report_review_brief, report_sweep_markdown
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -272,6 +273,71 @@ end
 -- text for Feishu and Telegram, whose Markdown dialects reject characters that
 -- company names and dividend plans routinely contain.
 -- ---------------------------------------------------------------------------
+
+-- A parameter grid as Markdown. The winner is printed with its neighbours,
+-- because on one stock's history the winner alone means very little.
+function g_exports.report_sweep_markdown(r)
+    local L = {}
+    local function line(s) L[#L + 1] = s or '' end
+    local function f(...) line(string.format(...)) end
+    local OBJ = { median = '中位数收益', avg = '平均收益', win_rate = '胜率' }
+
+    f('# 参数网格 %s %s', r.code or '', r.name or '')
+    line()
+    f('信号：%s', r.signal_note or '')
+    f('区间 %s – %s（%d 个交易日）；按持有 %d 日的%s排名；走平用 %d 个交易日判断%s',
+        r.from or '—', r.to or '—', r.days or 0, r.horizon or 0,
+        OBJ[r.objective] or r.objective, r.flat_lookback or 0,
+        (r.min_day_gain or 0) > 0 and string.format('；当天涨幅需 ≥ %s', report_pct(r.min_day_gain, 1)) or '')
+    local req = r.require_ or {}
+    f('约束：至少触发 %d 次%s%s%s', req.min_entries or 0,
+        req.min_win_rate and string.format('，胜率 ≥ %s', report_pct(req.min_win_rate, 0)) or '',
+        req.max_worst and string.format('，最差一笔 ≥ %s', report_pct(req.max_worst, 1)) or '',
+        req.max_sl and string.format('，先到止损 ≤ %d 次', req.max_sl) or '')
+    line()
+
+    local b = r.best
+    if not b then
+        line('## 没有一组参数满足约束')
+        line()
+        line('放宽约束（min_entries、min_win_rate、max_worst）再试，或者换一只股票。')
+        return table.concat(L, '\n')
+    end
+    line('## 最优')
+    line()
+    f('**%d 日均线（约 %.0f 周）+ %s，走平容忍 %s**', b.ma_days, b.ma_days / 5,
+        report_pct(b.above_pct, 1), report_pct(b.flat_max, 1))
+    f('- 触发 %d 次（有 %d 次有完整的持有期），胜率 %s', b.entries or 0, b.n or 0,
+        report_pct(b.win_rate, 0))
+    f('- 中位数 %s，平均 %s，最好 %s，最差 %s', report_pct(b.median, 1), report_pct(b.avg, 1),
+        report_pct(b.best, 1), report_pct(b.worst, 1))
+    f('- 止盈止损：先到止盈 %d / 先到止损 %d，止盈命中率 %s', b.hit_tp or 0, b.hit_sl or 0,
+        report_pct(b.barrier_win_rate, 0))
+    local nb = r.neighbours
+    if nb and nb.n and nb.n > 0 then
+        f('- 邻居 %d 格：%s 均值 %s，最差的一格 %s —— 邻居也好才是一片高地，孤峰就是运气',
+            nb.n, OBJ[r.objective] or '', report_pct(nb.mean, 1), report_pct(nb.worst, 1))
+    end
+    local base = r.baseline or {}
+    f('- 基准（同窗口随便哪天买）：胜率 %s，中位数 %s，平均 %s',
+        report_pct(base.win_rate, 0), report_pct(base.median, 1), report_pct(base.avg, 1))
+    line()
+
+    line('## 排名前 10')
+    line()
+    line('| 均线 | 高出 | 走平 | 触发 | 胜率 | 中位数 | 平均 | 最差 | 止盈/止损 |')
+    line('|---|---|---|---|---|---|---|---|---|')
+    for _, x in ipairs(r.ranked or {}) do
+        f('| %d 日 | %s | %s | %d | %s | %s | %s | %s | %d/%d |', x.ma_days,
+            report_pct(x.above_pct, 1), report_pct(x.flat_max, 1), x.n or 0,
+            report_pct(x.win_rate, 0), report_pct(x.median, 1), report_pct(x.avg, 1),
+            report_pct(x.worst, 1), x.hit_tp or 0, x.hit_sl or 0)
+    end
+    line()
+    for _, n in ipairs(r.notes or {}) do f('> %s', n) end
+    line()
+    return table.concat(L, '\n')
+end
 
 -- The review as a few lines, for a push message. The full three-part review
 -- is a page; a WeCom application message is 2,000 bytes, and nobody reads a
