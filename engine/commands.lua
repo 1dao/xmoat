@@ -31,6 +31,7 @@ local function install_system()
                         terminal_growth = cfg_num('DCF_TERMINAL_GROWTH', 3),
                         years = cfg_int('DCF_YEARS', 10) },
                 thresholds = checks_thresholds,
+                calendar = calendar_status(),
                 time = util_now_iso(),
             }
         end,

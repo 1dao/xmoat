@@ -50,7 +50,7 @@
 
 | 命令 | HTTP | 参数 | 返回 |
 |---|---|---|---|
-| `system.info` | `GET /api/v1/system/info` | — | 版本、数据源、DCF 假设、检查阈值 |
+| `system.info` | `GET /api/v1/system/info` | — | 版本、数据源、DCF 假设、检查阈值、交易日历状态 |
 | `system.commands` | `GET /api/v1/system/commands` | — | 全部命令及参数 |
 | `watchlist.list` | `GET /api/v1/watchlist` | — | `WatchItem[]` |
 | `watchlist.add` | `POST /api/v1/watchlist` | `code`，`note?`，`band?` | `WatchEntry`（不会自动抓取） |

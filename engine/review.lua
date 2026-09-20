@@ -125,6 +125,12 @@ function g_exports.review_sectors(opts)
 
     local ttl = opts.max_age_min or cfg_int('REVIEW_SECTOR_TTL_MIN', 30)
     if opts.offline then return doc end
+    -- The board table is a market number like any other: outside trading hours
+    -- it cannot have changed since the last close, so the calendar answers
+    -- first and the age limit only decides during a session.
+    if not opts.force and doc and calendar_quiet(calendar_last_trading_day(), doc.fetched_at) then
+        return doc
+    end
     if not opts.force and doc and not quote_is_stale(doc, ttl) then return doc end
 
     local got, err = source_em_fetch_sectors(kind)

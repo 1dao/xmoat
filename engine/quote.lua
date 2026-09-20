@@ -73,15 +73,20 @@ function g_exports.quote_merge(old, fresh)
     return out, false
 end
 
--- Whether a cached series should be fetched again. Daily bars only change
--- after the close, but the last one moves while the market is open, so this is
--- a plain age limit rather than a market calendar the engine does not have.
+-- Whether a cached series should be fetched again.
+--
+-- Two questions, in this order. First, could anything newer exist at all —
+-- engine/calendar.lua answers that from the last bar held and when it was
+-- taken, and says no all weekend, all evening and all through a holiday.
+-- Only when it might does the age limit decide, because the last bar of a
+-- day that is still trading keeps moving.
 function g_exports.quote_is_stale(doc, max_age_min)
     if not doc or type(doc.rows) ~= 'table' or #doc.rows == 0 then return true end
     max_age_min = max_age_min or cfg_int('QUOTE_TTL_MIN', 180)
     if max_age_min <= 0 then return true end
     local fetched = doc.fetched_at
     if type(fetched) ~= 'string' then return true end
+    if calendar_quiet(doc.last_date, fetched) then return false end
     -- Both sides are util_now_iso, which is UTC: comparing against a local
     -- date here would make a cache look eight hours older or younger than it
     -- is, depending on the machine's timezone.

@@ -351,6 +351,9 @@ local function fixture_transport(url)
         return body('em_sectors.json')
     elseif url:find('/qt/stock/kline/get', 1, true) then
         if url:find('secid=1.600519', 1, true) then return body('em_kline_600519.json') end
+        -- The regime index, so the trading calendar has days to read. The bars
+        -- are a stock's; only their dates matter here.
+        if url:find('secid=1.000300', 1, true) then return body('em_kline_600519.json') end
         return body('em_kline_empty.json')
     elseif url:find('BusinessAnalysis', 1, true) then
         if url:find('600519', 1, true) then return body('em_business_600519.json') end
@@ -1032,6 +1035,59 @@ local function test_levels()
         (levels_build({ { date = '2026-01-01', close = 10, pe_ttm = 10 } }, {})), nil)
 end
 
+local function test_calendar()
+    section('trading calendar')
+    -- 2026-09-18 is a Friday, the 19th and 20th the weekend, the 21st Monday.
+    eq('the next weekday after a Friday is Monday', calendar_next_weekday('2026-09-18'), '2026-09-21')
+    eq('after a Saturday, the same Monday', calendar_next_weekday('2026-09-19'), '2026-09-21')
+    eq('after a Monday, Tuesday', calendar_next_weekday('2026-09-21'), '2026-09-22')
+    -- 15:10 Beijing is 07:10 UTC.
+    eq('a day settles at 07:10 UTC', calendar_close_at('2026-09-18') % 1440, 7 * 60 + 10)
+
+    local friday, taken = '2026-09-18', '2026-09-18T08:00:00Z'
+    check('Saturday is quiet', calendar_quiet(friday, taken, '2026-09-19T03:00:00Z'))
+    check('Sunday night too', calendar_quiet(friday, taken, '2026-09-20T23:00:00Z'))
+    check('and Monday before the close', calendar_quiet(friday, taken, '2026-09-21T02:00:00Z'))
+    check('after Monday closes there could be a new bar',
+        not calendar_quiet(friday, taken, '2026-09-21T08:00:00Z'))
+
+    -- A holiday is discovered, not declared: we looked after Monday's close
+    -- and Friday was still the last day, so the next chance is Tuesday's.
+    local looked_monday = '2026-09-21T08:00:00Z'
+    check('a day that produced no bar moves the next check on',
+        calendar_quiet(friday, looked_monday, '2026-09-21T12:00:00Z'))
+    check('and keeps it off all evening', calendar_quiet(friday, looked_monday, '2026-09-21T23:00:00Z'))
+    check('until the following close', not calendar_quiet(friday, looked_monday, '2026-09-22T08:00:00Z'))
+    -- A week-long holiday: each check that finds nothing pushes it one day on.
+    check('a whole week of them is one request a day, not one every three hours',
+        calendar_quiet(friday, '2026-09-25T08:00:00Z', '2026-09-25T23:00:00Z'))
+
+    -- A bar of a day that is still trading is provisional.
+    check('mid-session, the age limit decides', not calendar_quiet(friday, '2026-09-18T02:00:00Z',
+        '2026-09-18T03:00:00Z'))
+    check('and a bar taken mid-session is refetched after the close',
+        not calendar_quiet(friday, '2026-09-18T02:00:00Z', '2026-09-18T08:00:00Z'))
+    eq('without a last day there is nothing to conclude',
+        calendar_quiet(nil, taken, '2026-09-19T03:00:00Z'), false)
+
+    -- quote_is_stale defers to it: a series from years ago is stale whatever
+    -- the clock says.
+    check('an old cache is still stale', quote_is_stale({ rows = { { date = '2020-01-02' } },
+        last_date = '2020-01-02', fetched_at = '2020-01-02T08:00:00Z' }, 180))
+
+    -- The days that actually traded are read off the cached index.
+    __net_set_transport(fixture_transport)
+    eq('cache the regime index', api_call('quote.refresh', { code = 'idx:000300' }).ok, true)
+    local days = calendar_trading_days()
+    eq('the calendar is the index series', days and days.to, '2026-09-15')
+    eq('a day in it traded', calendar_is_trading_day('2026-09-04'), true)
+    -- 2026-09-05 is a Saturday: inside the range, absent from the series.
+    eq('a day inside the range but missing did not', calendar_is_trading_day('2026-09-05'), false)
+    eq('beyond the range it says it does not know', calendar_is_trading_day('2019-01-01'), nil)
+    eq('and the status reports the source', calendar_status().source, '000300')
+    __net_set_transport(nil)
+end
+
 local function test_quote()
     section('daily prices')
     local k = source_em_parse_kline(fixture('em_kline_600519.json'))
@@ -1651,6 +1707,7 @@ local function run_all()
     test_broker()
     test_market()
     test_quote()
+    test_calendar()
     test_tech()
     test_levels()
     test_review()

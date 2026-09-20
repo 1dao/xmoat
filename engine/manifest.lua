@@ -25,6 +25,7 @@ return {
     'engine/events.lua',     -- events_*    what changed between two refreshes
     'engine/store.lua',      -- store_*     JSON files under DATA_DIR
     'engine/quote.lua',      -- quote_*     daily prices, cached and extended
+    'engine/calendar.lua',   -- calendar_*  when new daily data can exist
     'engine/notify.lua',     -- notify_*    push channels
     'engine/wxcrypt.lua',    -- wxcrypt_*   WeCom's callback envelope
     'engine/llm.lua',        -- llm_*       one chat call: Claude or OpenAI-compatible
