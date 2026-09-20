@@ -2,7 +2,7 @@
 -- already held.
 --
 -- Exports: quote_load, quote_refresh, quote_series, quote_status, quote_view,
---          quote_resolve, quote_merge, quote_is_stale
+--          quote_resolve, quote_merge, quote_is_stale, quote_prefetch
 --
 -- WHY A CACHE AT ALL. Everything technical — moving averages, a chip
 -- distribution, a backtest — reads years of daily bars. Fetching those again
@@ -234,6 +234,67 @@ function g_exports.quote_series(code, opts)
         return doc
     end
     return nil, ecode, emsg
+end
+
+-- COROUTINE-ONLY. Fill the cache for many stocks at once.
+--
+-- The point of the TDX source: several connections, each pulling the next
+-- code off one list, so a hundred stocks take the time of a hundred divided
+-- by the pool rather than a hundred round trips in a row. Codes that are
+-- already cached and fresh cost nothing at all.
+--
+-- opts = { source, workers, force, max_days, on_progress }
+-- Returns { total, fetched, cached, failed = { {code, error} } }.
+function g_exports.quote_prefetch(codes, opts)
+    opts = opts or {}
+    local source = opts.source or cfg_get('PRICE_SOURCE', 'em')
+    -- Eastmoney is fetched one at a time whatever the caller asks: parallel
+    -- HTTPS is exactly what makes it start refusing.
+    local workers = source == 'tdx' and math.max(1, math.min(opts.workers
+        or cfg_int('TDX_CONNECTIONS', 4), 8)) or 1
+
+    local queue, next_index = {}, 1
+    for _, c in ipairs(codes or {}) do queue[#queue + 1] = c end
+    local out = { total = #queue, fetched = 0, cached = 0, failed = util_json_array({}) }
+    if #queue == 0 then return out end
+
+    local running = 0
+    local function work()
+        while true do
+            local i = next_index
+            if i > #queue then break end
+            next_index = i + 1
+            local code = queue[i]
+            local doc = quote_load(code)
+            local fresh = doc and (doc.source or 'em') == source and not opts.force
+                and not quote_is_stale(doc)
+            if fresh then
+                out.cached = out.cached + 1
+            else
+                local got, _, err = quote_refresh(code, { source = source, full = opts.force })
+                if got then
+                    out.fetched = out.fetched + 1
+                else
+                    out.failed[#out.failed + 1] = { code = code, error = tostring(err) }
+                end
+            end
+            if opts.on_progress and (out.fetched + out.cached + #out.failed) % 25 == 0 then
+                opts.on_progress(out)
+            end
+        end
+        running = running - 1
+    end
+
+    for _ = 1, workers do
+        running = running + 1
+        sched_spawn('quote prefetch', work)
+    end
+    -- Each worker runs until the queue is empty; this waits for all of them.
+    sched_wait_until(function() return running <= 0 end,
+                     cfg_int('PREFETCH_TIMEOUT_MS', 600000))
+    cfg_log_info('prefetch: %d cached, %d fetched, %d failed (%s, %d worker(s))',
+        out.cached, out.fetched, #out.failed, source, workers)
+    return out
 end
 
 -- What is cached, without the rows: for a status line and for deciding

@@ -140,6 +140,26 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   the watchlist out of what is already stored. Breadth counts BOARDS — the
   fine industry boards overlap, so summing their stock counts double-counts.
 
+## The 通达信 price source, and wide scans
+
+- `engine/tdx.lua` speaks the 通达信 quote protocol over raw TCP: framed
+  request/response, zlib bodies (`xcompress`), prices as a sign-and-continue
+  varint of thousandths, volumes in TDX's own float. A frame that is not the
+  answer to the request is skipped, never mistaken for it. Connections are
+  pooled (`TDX_CONNECTIONS`), and `engine_stop` closes them.
+- `engine/source_tdx.lua` turns those raw bars into xmoat records and does the
+  forward adjustment itself from the ex-rights records. Verified against
+  Eastmoney's own 前复权: 0.0036% mean difference over 1,200 days.
+- TDX carries NO turnover rate, so no chip distribution. A watched stock is
+  therefore always filled from Eastmoney (`stock_refresh` asks for `em`), and
+  the cache records its `source`; asking for the other one refetches the whole
+  series rather than splicing two bases together.
+- `quote_prefetch` fetches a whole universe in parallel over the pool —
+  Eastmoney stays serial, because parallel HTTPS is what makes it refuse.
+- `engine/strategy.lua` is one rule across many stocks: `strategy_sweep` pools
+  every signal into one sample per parameter cell (one stock's history is one
+  path), `strategy_scan` asks who is firing now. Both prefetch first.
+
 ## Screening
 
 - `engine/market.lua` keeps its own snapshot (`data/market.json`): two

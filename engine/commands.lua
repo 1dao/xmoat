@@ -579,7 +579,7 @@ local function strategy_params(with_grid)
         codes = { type = 'string', doc = '股票代码，逗号分隔；给了就用它，不看 universe' },
         universe = { type = 'string', enum = { 'watchlist', 'screen' },
                      doc = '默认 watchlist；screen 用全市场快照按下面的条件筛' },
-        limit = { type = 'integer', doc = '最多看多少只，默认 50，最多 200' },
+        limit = { type = 'integer', doc = '最多看多少只，默认 30，最多 1000' },
         roe_min = { type = 'number', doc = 'universe=screen 时的筛选条件' },
         pe_max = { type = 'number' }, pb_max = { type = 'number' },
         cap_min = { type = 'number', doc = '总市值下限（亿元）' },
@@ -588,6 +588,8 @@ local function strategy_params(with_grid)
         flat_lookback = { type = 'integer', doc = '用多少个交易日判断走平，默认 25' },
         min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0' },
         offline = { type = 'boolean', doc = '只用本地行情缓存，不联网' },
+        price_source = { type = 'string', enum = { 'tdx', 'em' },
+                         doc = '行情来源，默认 tdx（通达信协议，可并发）' },
     }
     if with_grid then
         p.horizon = { type = 'integer', doc = '按持有多少个交易日排名，默认 60' }
@@ -621,6 +623,7 @@ local function strategy_common(p)
     end
     return {
         codes = codes, universe = p.universe, limit = p.limit,
+        price_source = p.price_source,
         filters = { roe_min = p.roe_min, pe_max = p.pe_max, pb_max = p.pb_max,
                     cap_min = p.cap_min, industry = p.industry, include_st = p.include_st,
                     sort = 'roe', order = 'desc' },
@@ -635,8 +638,8 @@ local function install_strategy()
         summary = '在一组股票上一起拟合参数：均线走平后突破，哪组窗口与幅度最好',
         params = strategy_params(true),
         handler = function(p)
-            if p.limit and (p.limit < 1 or p.limit > 200) then
-                return nil, 'bad_request', 'limit 应在 1 到 200 之间'
+            if p.limit and (p.limit < 1 or p.limit > 1000) then
+                return nil, 'bad_request', 'limit 应在 1 到 1000 之间'
             end
             if p.horizon and (p.horizon < 5 or p.horizon > 500) then
                 return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
@@ -663,8 +666,8 @@ local function install_strategy()
         summary = '扫描现在正在发出信号的股票：均线走平后突破',
         params = strategy_params(false),
         handler = function(p)
-            if p.limit and (p.limit < 1 or p.limit > 200) then
-                return nil, 'bad_request', 'limit 应在 1 到 200 之间'
+            if p.limit and (p.limit < 1 or p.limit > 1000) then
+                return nil, 'bad_request', 'limit 应在 1 到 1000 之间'
             end
             if p.ma_days and (p.ma_days < 2 or p.ma_days > 500) then
                 return nil, 'bad_request', 'ma_days 应在 2 到 500 之间'

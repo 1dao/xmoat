@@ -17,9 +17,12 @@
 -- baseline (buying any day of the same window, across the same stocks) is
 -- reported beside them so the comparison is like for like.
 --
--- WHAT IT COSTS. Every stock needs its daily bars. Cached ones are free; the
--- rest are a request each, paced, and about 200 KB apiece. A universe of fifty
--- is a minute of fetching the first time and instant afterwards.
+-- WHAT IT COSTS. Every stock needs its daily bars, and they are fetched
+-- before any analysis starts — the whole universe, in parallel, over the
+-- 通达信 connections (engine/quote.lua's quote_prefetch). Cached ones cost
+-- nothing. That is the difference between a scan of a few hundred stocks
+-- taking a couple of minutes and taking half an hour of HTTPS handshakes that
+-- the server eventually refuses.
 
 -- A stock the cache has never seen needs its WHOLE history, half a megabyte
 -- of it, and the quote server starts dropping connections when those arrive
@@ -29,6 +32,27 @@
 local PACE_DEFAULT = 1500
 local RETRY_PAUSE_MS = 3000
 
+-- Which source a wide scan pulls from. TDX by default: it is the one that can
+-- answer hundreds of stocks without falling over. STRATEGY_PRICE_SOURCE=em
+-- goes back to Eastmoney, slowly.
+local function scan_source(opts)
+    return opts.price_source or cfg_get('STRATEGY_PRICE_SOURCE', 'tdx')
+end
+
+-- COROUTINE-ONLY. Fill the cache for the whole universe before anything is
+-- computed: one pass, in parallel, with the failures listed rather than
+-- retried forever.
+local function prefetch(list, opts)
+    local codes = {}
+    for _, item in ipairs(list) do codes[#codes + 1] = item.code end
+    if opts.offline then return { total = #codes, cached = 0, fetched = 0,
+                                  failed = util_json_array({}) } end
+    local t0 = util_now_ms()
+    local res = quote_prefetch(codes, { source = scan_source(opts), force = opts.force })
+    res.ms = util_now_ms() - t0
+    return res
+end
+
 -- Codes to work on. `codes` wins; otherwise the watchlist, or a screen of the
 -- market snapshot when filters are given.
 --
@@ -36,7 +60,10 @@ local RETRY_PAUSE_MS = 3000
 -- COROUTINE-FREE: the screen reads the stored snapshot.
 function g_exports.strategy_universe(opts)
     opts = opts or {}
-    local limit = math.max(1, math.min(opts.limit or 30, 200))
+    -- A thousand is a few minutes of fetching over the TDX connections and
+    -- well inside what the snapshot holds; the default stays small because a
+    -- scan is usually a question about a shortlist.
+    local limit = math.max(1, math.min(opts.limit or 30, 1000))
     local out = {}
     if type(opts.codes) == 'table' and #opts.codes > 0 then
         for _, c in ipairs(opts.codes) do
@@ -70,19 +97,16 @@ end
 -- a cache hit, so a warm universe costs nothing.
 local function bars_for(code, opts)
     local doc = quote_load(code)
-    if doc and type(doc.rows) == 'table' and #doc.rows > 0 and
-       (opts.offline or not quote_is_stale(doc)) then
-        return doc.rows, doc
-    end
-    if opts.offline then
-        return nil, doc and '缓存过旧' or '没有行情缓存'
-    end
+    if doc and type(doc.rows) == 'table' and #doc.rows > 0 then return doc.rows, doc end
+    if opts.offline then return nil, doc and '缓存为空' or '没有行情缓存' end
+    -- The prefetch already tried; this is the one-at-a-time fallback for a
+    -- code it could not get, and it is paced because it means Eastmoney.
     local pace = opts.pace_ms or cfg_int('STRATEGY_PACE_MS', PACE_DEFAULT)
-    local fresh, ecode, err = quote_refresh(code)
+    local fresh, ecode, err = quote_refresh(code, { source = scan_source(opts) })
     sched_sleep(pace)
     if not fresh and ecode ~= 'not_found' then
         sched_sleep(RETRY_PAUSE_MS)
-        fresh, ecode, err = quote_refresh(code)
+        fresh, ecode, err = quote_refresh(code, { source = scan_source(opts) })
         sched_sleep(pace)
     end
     if not fresh or type(fresh.rows) ~= 'table' or #fresh.rows == 0 then
@@ -193,6 +217,7 @@ function g_exports.strategy_sweep(opts)
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
+    local fetch = prefetch(list, opts)
     local collected, used, skipped = {}, {}, {}
     local base_rets = {}
     local first_offset = (opts.ma_days and math.max(table.unpack(opts.ma_days)) or 70) +
@@ -235,7 +260,7 @@ function g_exports.strategy_sweep(opts)
 
     return {
         universe = kind, stocks = #used, skipped = util_json_array(skipped),
-        used = util_json_array(used),
+        used = util_json_array(used), fetch = fetch,
         from = from, to = to, days = bars,
         signal = 'breakout', signal_note = backtest_signal_list.breakout,
         horizon = horizon, objective = objective,
@@ -274,6 +299,7 @@ function g_exports.strategy_scan(opts)
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
+    local fetch = prefetch(list, opts)
     local hits, checked, skipped = {}, 0, {}
     for _, item in ipairs(list) do
         local px, why = bars_for(item.code, opts)
@@ -288,17 +314,24 @@ function g_exports.strategy_scan(opts)
                 flat_max = opts.flat_max or 2, above_pct = opts.above_pct or 6,
                 min_day_gain = opts.min_day_gain, cooldown = 1,
             })
+            -- The newest signal per stock and no more: with a window of
+            -- several days the same breakout otherwise appears once a day,
+            -- which reads as several opportunities and is one.
+            local newest
             for _, e in ipairs(found.entries) do
-                if e.index > #px - days then
-                    hits[#hits + 1] = {
-                        code = item.code, name = item.name, industry = item.industry,
-                        date = e.date, close = e.close, ma = e.ma,
-                        above = e.above, slope = e.slope, day_gain = e.day_gain,
-                        bars_ago = #px - e.index,
-                        pe_ttm = item.pe_ttm, pb = item.pb, roe = item.roe,
-                        market_cap = item.market_cap,
-                    }
+                if e.index > #px - days and (not newest or e.index > newest.index) then
+                    newest = e
                 end
+            end
+            if newest then
+                hits[#hits + 1] = {
+                    code = item.code, name = item.name, industry = item.industry,
+                    date = newest.date, close = newest.close, ma = newest.ma,
+                    above = newest.above, slope = newest.slope, day_gain = newest.day_gain,
+                    bars_ago = #px - newest.index,
+                    pe_ttm = item.pe_ttm, pb = item.pb, roe = item.roe,
+                    market_cap = item.market_cap,
+                }
             end
         end
     end
@@ -314,7 +347,7 @@ function g_exports.strategy_scan(opts)
         end
     end
     return {
-        universe = kind, checked = checked, days = days,
+        universe = kind, checked = checked, days = days, fetch = fetch,
         params = { ma_days = opts.ma_days or 50, above_pct = opts.above_pct or 6,
                    flat_max = opts.flat_max or 2, flat_lookback = opts.flat_lookback or 25,
                    min_day_gain = opts.min_day_gain or 0 },

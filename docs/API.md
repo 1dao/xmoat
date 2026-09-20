@@ -64,6 +64,9 @@
 | `quote.get` | `GET /api/v1/stocks/:code/quotes` | `days?`（默认 250），`offline?` | `Quotes`；本地缓存够新就直接返回 |
 | `quote.refresh` | `POST /api/v1/stocks/:code/quotes/refresh` | `full?` | `Quotes`（不含 rows）；已有缓存时只抓最后一天之后的部分 |
 | `backtest.run` | `GET /api/v1/stocks/:code/backtest` | `signal?`，`percentile?`，`take_profit?`，`stop_loss?`，`horizon?`，`cooldown?`，`offline?` | `Backtest`：方向胜率、止盈止损命中率，以及同窗口的基准 |
+| `backtest.sweep` | `GET /api/v1/stocks/:code/backtest/sweep` | `horizon?`，`ma_days?`，`above_pct?`，`flat_max?`，`objective?`，`min_entries?`，`max_worst?` … | `Sweep`：一只股票上的参数网格 |
+| `strategy.sweep` | `GET /api/v1/strategy/sweep` | 同上，外加 `codes?` / `universe?` / `limit?` 与筛选条件 | `Sweep`：一组股票合在一起拟合 |
+| `strategy.scan` | `GET /api/v1/strategy/scan` | `ma_days?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
@@ -348,6 +351,56 @@ type Barrier = {
 }
 ```
 
+### Sweep 与 Scan
+
+口径见 [METRICS.md](METRICS.md#均线走平后的突破)。`Sweep` 是参数网格，`Scan` 是「现在谁在发信号」。
+两者都可以指定股票范围：`codes`（逗号分隔）优先，其次 `universe=screen`（用全市场快照按 `roe_min` 等条件筛），
+默认是自选。
+
+```ts
+type SweepRow = {
+  ma_days: number, above_pct: number, flat_max: number,
+  entries: number, stocks?: number,         // stocks 仅多股票拟合：几只股票出过信号
+  n: number,                                // 有完整持有期的次数
+  win_rate?: number, avg?: number, median?: number, best?: number, worst?: number,  // %
+  hit_tp: number, hit_sl: number, barrier_win_rate?: number,
+}
+
+type Sweep = {
+  code?: string, name?: string,             // 单只股票时
+  universe?: 'codes' | 'screen' | 'watchlist', stocks?: number,   // 多只股票时
+  signal: 'breakout', signal_note: string,
+  from?: string, to?: string, days?: number,
+  horizon: number, objective: 'median' | 'avg' | 'win_rate',
+  flat_lookback: number, min_day_gain: number, cooldown: number,
+  require_: { min_entries: number, min_win_rate?: number, max_worst?: number, max_sl?: number },
+  grid: SweepRow[],                         // 整张表，按参数排序
+  ranked: SweepRow[],                       // 满足约束的前 10 名
+  best?: SweepRow,
+  neighbours?: { n: number, mean?: number, worst?: number, cells: SweepRow[] },
+  baseline: { n: number, win_rate?: number, avg?: number, median?: number, worst?: number },
+  fetch?: { total: number, cached: number, fetched: number, ms?: number, failed: {code, error}[] },
+  notes: string[],
+}
+
+type Scan = {
+  universe: string, checked: number, days: number,
+  params: { ma_days: number, above_pct: number, flat_max: number,
+            flat_lookback: number, min_day_gain: number },
+  hits: {
+    code: string, name?: string, industry?: string,
+    date: string, close: number, ma: number,
+    above: number,                          // 高出均线 %
+    slope: number,                          // 均线在 flat_lookback 内的变动 %
+    day_gain?: number, bars_ago: number,    // 距今几个交易日
+    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+  }[],                                      // 每只股票只留最近的一次
+  skipped: { code: string, reason: string }[],
+  fetch?: { total: number, cached: number, fetched: number, failed: {code, error}[] },
+  note: string,
+}
+```
+
 ### Review
 
 三段式复盘，口径见 [METRICS.md](METRICS.md#复盘与-regime)。指数来自日线缓存（和个股同一套缓存规则），
@@ -423,6 +476,7 @@ type Quotes = {                             // 日线，前复权
   fetched_at: string,                       // 这份缓存是什么时候抓的
   first_date: string, last_date: string,    // 缓存覆盖的区间
   days: number,                             // 缓存里一共多少个交易日
+  source: 'em' | 'tdx',                     // 这份缓存是谁填的，见 METRICS
   rows: {
     date: string,
     open: number, high: number, low: number, close: number,
