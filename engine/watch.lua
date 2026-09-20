@@ -3,9 +3,19 @@
 -- Exports: watch_load, watch_list, watch_get, watch_add, watch_update, watch_remove
 --
 -- Held in memory, written through on every change. An entry:
---   { code, added_at, note, band = { metric, low, high } }
+--   { code, added_at, note, band = { metric, low, high },
+--     position = { shares, cost, since } }
 -- `band` is the user's own fair-value range; the engine reports where the
 -- price sits against it and never sets one itself.
+--
+-- `position` means "I own this", and it is what turns the price alerts on:
+-- a buy range entered or a stop broken is only worth interrupting someone for
+-- when they hold the thing. Watching without holding stays quiet — see
+-- engine/events.lua. Both numbers are optional: marking a stock as held with
+-- no cost and no size is a valid answer to "do you own it".
+--
+-- The engine never writes a position of its own. It has no broker connection
+-- and cannot know what was actually bought.
 
 local doc = nil          -- { version = 1, items = { entry, ... } }
 
@@ -73,7 +83,28 @@ local function merge_band(current, patch)
     return band
 end
 
--- fields: { note?, band? }. Returns the entry, or nil plus (code, message).
+-- Validate a position patch. Returns the new position (nil to clear), or
+-- false plus a message. An empty object is kept, not cleared: it is the
+-- "I hold this, never mind how much" case.
+local function merge_position(current, patch)
+    if patch == util_null then return nil end
+    if type(patch) ~= 'table' then return false, 'position 必须是对象' end
+    local pos = util_copy(current)
+    for _, k in ipairs({ 'shares', 'cost' }) do
+        if patch[k] ~= nil then pos[k] = patch[k] end
+        if pos[k] == util_null then pos[k] = nil end
+        if pos[k] ~= nil and not util_num(pos[k]) then
+            return false, 'position.' .. k .. ' 必须是数字'
+        end
+    end
+    if pos.shares ~= nil and pos.shares < 0 then return false, 'position.shares 不能为负' end
+    if pos.cost ~= nil and pos.cost <= 0 then return false, 'position.cost 必须大于 0' end
+    pos.since = pos.since or util_now_iso()
+    return pos
+end
+
+-- fields: { note?, band?, position? }. Returns the entry, or nil plus
+-- (code, message).
 function g_exports.watch_add(code, fields)
     fields = fields or {}
     if index_of(code) then return nil, 'conflict', code .. ' 已在自选中' end
@@ -84,6 +115,11 @@ function g_exports.watch_add(code, fields)
         if band == false then return nil, 'bad_request', berr end
         entry.band = band
     end
+    if fields.position ~= nil then
+        local pos, perr = merge_position(nil, fields.position)
+        if pos == false then return nil, 'bad_request', perr end
+        entry.position = pos
+    end
     doc.items[#doc.items + 1] = entry
     local ok, err = save()
     if not ok then
@@ -93,7 +129,7 @@ function g_exports.watch_add(code, fields)
     return entry
 end
 
--- patch: { note?, band? }; util_null clears a field.
+-- patch: { note?, band?, position? }; util_null clears a field.
 function g_exports.watch_update(code, patch)
     local i = index_of(code)
     if not i then return nil, 'not_found', code .. ' 不在自选中' end
@@ -108,6 +144,11 @@ function g_exports.watch_update(code, patch)
         local band, berr = merge_band(entry.band, patch.band)
         if band == false then return nil, 'bad_request', berr end
         updated.band = band
+    end
+    if patch.position ~= nil then
+        local pos, perr = merge_position(entry.position, patch.position)
+        if pos == false then return nil, 'bad_request', perr end
+        updated.position = pos
     end
     doc.items[i] = updated
     local ok, err = save()

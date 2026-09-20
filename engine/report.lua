@@ -43,7 +43,8 @@ local function fmt_unit(v, unit, digits)
 end
 
 local STATUS = { pass = '✅', warn = '⚠️', na = '➖' }
-local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉', check = '🔎', insight = '🧠' }
+local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉',
+                    check = '🔎', insight = '🧠', level = '📍', trend = '📈' }
 local POSITION = { below = '低于', inside = '位于', above = '高于' }
 local METRIC_LABEL = { pe_ttm = 'PE(TTM)', pb = 'PB', ps_ttm = 'PS(TTM)', pcf_ttm = 'PCF(TTM)' }
 
@@ -125,6 +126,16 @@ function g_exports.report_markdown(a)
         end
         if lv.reward_risk then
             f('- 盈亏比：%s（到目标价的空间 / 到止损价的空间）', num(lv.reward_risk, 2))
+        end
+        local pos = a.watch and a.watch.position
+        if pos then
+            local parts = {}
+            if has(pos.cost) then parts[#parts + 1] = '成本 ' .. num(pos.cost) end
+            if has(pos.shares) then parts[#parts + 1] = num(pos.shares, 0) .. ' 股' end
+            if has(pos.profit_pct) then parts[#parts + 1] = '浮动盈亏 ' .. report_pct(pos.profit_pct, 1) end
+            if has(pos.market_value) then parts[#parts + 1] = '市值 ' .. report_money(pos.market_value) end
+            f('- 持仓：%s（已登记持仓，所以这些点位会推送）',
+                #parts > 0 and table.concat(parts, '，') or '已持有')
         end
         line()
         for _, n in ipairs(lv.notes or {}) do f('> %s', n) end
@@ -386,11 +397,12 @@ function g_exports.report_review_markdown(r)
     if (w.count or 0) == 0 then
         line('- 自选为空。')
     else
-        line('| 代码 | 名称 | 收盘 | 涨跌 | 估值分位 | 警示 | 提示 |')
-        line('|---|---|---|---|---|---|---|')
+        line('| 代码 | 名称 | 收盘 | 涨跌 | 估值分位 | 持仓盈亏 | 警示 | 提示 |')
+        line('|---|---|---|---|---|---|---|---|')
         for _, x in ipairs(w.rows or {}) do
-            f('| %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—', num(x.close),
+            f('| %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—', num(x.close),
                 report_pct(x.change_pct, 2), report_pct(x.percentile, 0),
+                has(x.profit_pct) and report_pct(x.profit_pct, 1) or (x.held and '已持有' or '—'),
                 x.warnings or 0, #(x.flags or {}) > 0 and table.concat(x.flags, '、') or '—')
         end
     end

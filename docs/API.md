@@ -103,7 +103,12 @@
 ```ts
 type Band = { metric: 'pe_ttm' | 'pb' | 'ps_ttm' | 'pcf_ttm', low?: number, high?: number }
 
-type WatchEntry = { code: string, added_at: string, note?: string, band?: Band }
+type Position = {                           // 持仓；设置后才推送点位与技术面提醒
+  shares?: number, cost?: number,           // 都可省：空对象就表示「我持有，细节不填」
+  since: string,
+}
+
+type WatchEntry = { code: string, added_at: string, note?: string, band?: Band, position?: Position }
 
 type WatchItem = WatchEntry & {
   summary?: {                 // 缺失表示还没抓取过
@@ -139,7 +144,12 @@ type Analysis = {
   levels: Levels,                           // 规则算出的买入/止损/目标；算不出时只有 note
   dividends: Dividends,
   checks: Check[],
-  watch?: { note?: string, added_at: string, band?: Band },   // 不在自选中则缺失
+  watch?: {
+    note?: string, added_at: string, band?: Band,
+    position?: Position & {                 // 以下三项由引擎按最新收盘价算出
+      profit_pct?: number, profit?: number, market_value?: number,
+    },
+  },                                        // 不在自选中则缺失
   notes: string[],                          // 需要展示给用户的说明，如模板限制
   sources: { name: string, dataset: string, item: string, fetched_at: string }[],
 }
@@ -397,7 +407,8 @@ type Alert = {
   id: string,                               // 由股票和变化内容决定，同一变化只记一次
   seq: number,                              // 单调递增，用于 after_seq 轮询
   code: string, name: string,
-  kind: 'report' | 'dividend' | 'band' | 'percentile' | 'check',
+  kind: 'report' | 'dividend' | 'band' | 'percentile' | 'check' | 'level' | 'trend',
+  // level 与 trend 只对登记了持仓的股票产生
   title: string, detail: string,
   status?: 'pass' | 'warn',                 // 仅 check：变成了什么
   period?: string, date?: string,           // 报告期；公告日或估值日期

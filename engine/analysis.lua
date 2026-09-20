@@ -190,6 +190,24 @@ local function build_business(data)
     }
 end
 
+-- The position as a client sees it: what was entered, plus what it is worth
+-- at the last close. The profit is arithmetic on a cost the user typed — it
+-- knows nothing about fees, taxes or an average that changed with a top-up.
+local function build_position(pos, data)
+    if type(pos) ~= 'table' then return nil end
+    local out = { shares = util_num(pos.shares), cost = util_num(pos.cost), since = pos.since }
+    local latest = valuation_latest(data.valuation or {})
+    local close = latest and util_num(latest.close)
+    if close and out.cost and out.cost > 0 then
+        out.profit_pct = (close - out.cost) / out.cost * 100
+    end
+    if close and out.shares then
+        out.market_value = close * out.shares
+        if out.cost then out.profit = (close - out.cost) * out.shares end
+    end
+    return out
+end
+
 -- The technical block, or a note saying why there is none. Never an error:
 -- nothing above it depends on prices.
 local function build_technical(quotes)
@@ -247,7 +265,8 @@ function g_exports.analysis_build(data, watch, opts)
         levels = levels or { note = lerr },
         -- Copied: round_floats works in place, and these belong to the store.
         watch = watch and { note = watch.note, added_at = watch.added_at,
-                            band = watch.band and util_copy(watch.band) or nil } or nil,
+                            band = watch.band and util_copy(watch.band) or nil,
+                            position = build_position(watch.position, data) } or nil,
         notes = util_json_array(notes),
         sources = util_json_array(data.sources or {}),
     }

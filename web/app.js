@@ -427,9 +427,52 @@
         ? `${dcf.earnings_label} ${fmtMoney(dcf.earnings)}，未来 ${dcf.years} 年，折现率 ${fmtPct(dcf.discount_rate)}，永续增长 ${fmtPct(dcf.terminal_growth)}。${dcf.note || ''}`
         : (dcf.error || '') })));
 
-    tiles.append(bandTile(a));
+    tiles.append(bandTile(a), positionTile(a));
     card.append(tiles);
     return card;
+  }
+
+  // 持仓 is also the switch for the price alerts, so the tile says so.
+  function positionTile(a) {
+    const pos = (a.watch && a.watch.position) || null;
+    const tile = h('div', { class: 'tile' }, h('div', { class: 'label', text: '持仓' }));
+    if (!a.watch) {
+      tile.append(h('div', { class: 'foot', text: '加入自选后可以登记持仓。登记之后才会推送点位和技术面提醒。' }));
+      return tile;
+    }
+    if (pos) {
+      tile.append(h('div', { class: 'value', text: isNum(pos.profit_pct) ? fmtPct(pos.profit_pct) : '已持有' }),
+        h('div', { class: 'foot', text: [
+          isNum(pos.cost) ? `成本 ${fmtNum(pos.cost)}` : null,
+          isNum(pos.shares) ? `${fmtNum(pos.shares, 0)} 股` : null,
+          isNum(pos.market_value) ? `市值 ${fmtMoney(pos.market_value)}` : null,
+          '点位与技术面提醒已开启',
+        ].filter(Boolean).join('，') }));
+    } else {
+      tile.append(h('div', { class: 'foot', text: '未登记。登记持仓后，跌进买入区间、跌破止损、均线转向才会推送。' }));
+    }
+
+    const cost = h('input', { type: 'number', step: 'any', placeholder: '成本价', 'aria-label': '成本价', value: isNum(pos && pos.cost) ? pos.cost : undefined });
+    const shares = h('input', { type: 'number', step: 'any', placeholder: '股数', 'aria-label': '股数', value: isNum(pos && pos.shares) ? pos.shares : undefined });
+    const save = h('button', { class: 'btn btn-small', type: 'submit', text: pos ? '保存' : '登记持仓' });
+    const clear = h('button', { class: 'btn btn-small btn-quiet', type: 'button', text: '清仓' });
+    const form = h('form', { class: 'band-form mt-s' }, cost, shares, save, pos ? clear : null);
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const num = input => (input.value === '' ? null : Number(input.value));
+      busy(save, '…', async () => {
+        await api('PATCH', `/api/v1/watchlist/${enc(a.code)}`, { position: { cost: num(cost), shares: num(shares) } });
+        showStatus('持仓已保存，点位与技术面提醒已开启');
+        route();
+      });
+    });
+    clear.addEventListener('click', () => busy(clear, '…', async () => {
+      await api('PATCH', `/api/v1/watchlist/${enc(a.code)}`, { position: null });
+      showStatus('已清仓，不再推送点位提醒');
+      route();
+    }));
+    tile.append(form);
+    return tile;
   }
 
   function bandTile(a) {
@@ -1163,14 +1206,15 @@
       h('thead', {}, h('tr', {},
         h('th', { text: '代码' }), h('th', { text: '名称' }),
         h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '涨跌' }),
-        h('th', { class: 'r', text: '估值分位' }), h('th', { class: 'r', text: '警示' }),
-        h('th', { text: '提示' }))),
+        h('th', { class: 'r', text: '估值分位' }), h('th', { class: 'r', text: '持仓盈亏' }),
+        h('th', { class: 'r', text: '警示' }), h('th', { text: '提示' }))),
       h('tbody', {}, (w.rows || []).map(x => h('tr', {},
         h('td', {}, h('a', { href: '#/stock/' + enc(x.code), text: x.code })),
         h('td', { text: x.name || '—' }),
         h('td', { class: 'r num', text: fmtNum(x.close) }),
         h('td', { class: 'r num', text: fmtPct(x.change_pct, 2) }),
         h('td', { class: 'r num', text: fmtPct(x.percentile, 0) }),
+        h('td', { class: 'r num', text: isNum(x.profit_pct) ? fmtPct(x.profit_pct, 1) : (x.held ? '已持有' : '—') }),
         h('td', { class: 'r num', text: String(x.warnings || 0) }),
         h('td', {}, (x.flags || []).length
           ? h('span', { class: 'channel-list' }, x.flags.map(f => h('span', { class: 'tag', text: f })))

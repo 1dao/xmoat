@@ -523,6 +523,83 @@ local function test_events()
     return evs
 end
 
+local function test_position_events()
+    section('position, and the alerts it unlocks')
+    local old, new, watch = event_pair()
+    local opts = { dcf = { discount_rate = 10, terminal_growth = 3, years = 10 },
+                   percentile_low = 10, percentile_high = 90 }
+
+    -- Watching, not holding: the price alerts are not produced at all.
+    for _, e in ipairs(events_diff(old, new, watch, opts)) do
+        check('watching without holding produces no price alert', e.kind ~= 'level' and e.kind ~= 'trend', e.kind)
+    end
+
+    -- The same two refreshes, with a position configured. PE fell from 25 to
+    -- 10.05 while the close stayed at 10, so the price that would put PE at
+    -- the band low of 15 is now above the close: the stock has entered its own
+    -- buy range.
+    local held = util_copy(watch)
+    held.position = { cost = 12, shares = 100 }
+    local k = kinds_of(events_diff(old, new, held, opts))
+    eq('holding it turns the level alert on', k.level and k.level.title, '跌进买入区间')
+    check('and the alert carries the cost and what it is worth',
+        k.level and k.level.detail:find('浮动盈亏 -16.7%', 1, true), k.level and k.level.detail)
+    eq('staying in the zone does not repeat', #events_diff(new, new, held, opts), 0)
+
+    -- The position is in the analysis object too, with the arithmetic done.
+    local a = analysis_build(new, held, opts)
+    near('profit is measured from the cost the user typed', a.watch.position.profit_pct, -16.6667, 0.01)
+    near('and the holding is worth what it closed at', a.watch.position.market_value, 1000, 1e-6)
+    near('so the loss is in yuan as well', a.watch.position.profit, -200, 1e-6)
+
+    -- 均线转为多头排列: flat for 200 days, then rising. The old record's last
+    -- day is before the rise, the new one's well after it, and each side sees
+    -- only the bars up to its own day.
+    local px, dates = {}, {}
+    local d = '2024-01-01'
+    for i = 1, 320 do
+        local close = i <= 200 and 100 or (100 + (i - 200))
+        dates[i] = d
+        px[i] = { date = d, close = close, high = close, low = close, volume = 100,
+                  amount = close * 100 * 100, turnover = 1 }
+        d = util_date_add_days(d, 1)
+    end
+    local function record_to(last_index)
+        local rec = util_copy(new)
+        local rows = {}
+        for i = 1, last_index do
+            rows[i] = { date = dates[i], close = px[i].close, pe_ttm = 20, market_cap = 1000 }
+        end
+        rec.valuation = rows
+        return rec
+    end
+    local before, after = record_to(199), record_to(320)
+    local topts = util_copy(opts)
+    topts.quotes = { rows = px, last_date = dates[320] }
+    local tk = kinds_of(events_diff(before, after, held, topts))
+    eq('the averages falling into bull order is an alert', tk.trend and tk.trend.title, '均线转为多头排列')
+    check('only for a holder', kinds_of(events_diff(before, after, watch, topts)).trend == nil)
+    eq('and not again while they stay that way', kinds_of(events_diff(after, after, held, topts)).trend, nil)
+
+    -- Validation, through the command path.
+    eq('add the stock', api_call('watchlist.add', { code = '600519' }).ok, true)
+    eq('a negative size is refused', api_call('watchlist.update',
+        { code = '600519', position = { shares = -1 } }).error.code, 'bad_request')
+    eq('a cost of zero is refused', api_call('watchlist.update',
+        { code = '600519', position = { cost = 0 } }).error.code, 'bad_request')
+    eq('a cost given as text is refused, not guessed', api_call('watchlist.update',
+        { code = '600519', position = { cost = '12' } }).error.code, 'bad_request')
+    local set = api_call('watchlist.update', { code = '600519', position = { cost = 1200, shares = 100 } })
+    eq('a position is stored', set.ok and set.data.position.cost, 1200)
+    check('with the day it was set', set.ok and set.data.position.since ~= nil)
+    local marked = api_call('watchlist.update', { code = '600519', position = {} })
+    check('an empty object still means "I hold this"', marked.ok and marked.data.position ~= nil)
+    eq('and the earlier numbers survive it', marked.ok and marked.data.position.cost, 1200)
+    local cleared = api_call('watchlist.update', { code = '600519', position = util_null })
+    eq('null is selling out of it', cleared.ok and cleared.data.position, nil)
+    api_call('watchlist.remove', { code = '600519' })
+end
+
 local function test_notify()
     section('push channels')
     local long = string.rep('护城河', 60)                       -- 540 bytes
@@ -1518,6 +1595,7 @@ local function run_all()
     test_wecom_callback()
     test_alerts(evs)
     test_schedule()
+    test_position_events()
     test_refresh_events()
     test_business()
     test_llm()

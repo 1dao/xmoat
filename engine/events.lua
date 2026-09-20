@@ -15,6 +15,17 @@
 --               its high zone — crossing into the zone only, so a stock sitting
 --               at the 8th percentile does not announce itself every day
 --   check       a checklist item turned from pass to warn, or back
+--   level       the price crossed into the buy range, through the stop, or up
+--               to the target — HELD STOCKS ONLY (see below)
+--   trend       the moving averages turned into bull or bear order — held
+--               stocks only as well
+--
+-- WHY THOSE TWO NEED A POSITION. A price alert on something you merely watch
+-- is noise: there is nothing to do about it and it arrives every time the
+-- market moves. On something you own it is the opposite — a stop broken is the
+-- one message worth a phone buzzing. So `watch.position` is the switch, and
+-- with no position configured these two are never produced at all, not
+-- produced and filtered later.
 --
 -- An event's id is derived from the stock and what happened (the report
 -- period, the dividend plan's stage, the date a band was crossed), so recording
@@ -159,6 +170,68 @@ local function diff_percentile(old_a, new_a, out, rec, opts)
     })
 end
 
+-- Which price zone a close sits in. The stop is checked first: when the price
+-- is under both the buy range and the stop, the thing worth saying is the one
+-- about getting out, not the one about buying more.
+local function level_zone(a)
+    local lv, v = a.levels, a.valuation
+    if not lv or lv.note or not v then return nil end
+    local close = util_num(v.close)
+    if not close then return nil end
+    if lv.stop and util_num(lv.stop.price) and close <= lv.stop.price then return 'stop' end
+    if lv.target and util_num(lv.target.price) and close >= lv.target.price then return 'target' end
+    if lv.buy and util_num(lv.buy.high) and close <= lv.buy.high then return 'buy' end
+    return 'none'
+end
+
+local ZONE_TITLE = { buy = '跌进买入区间', stop = '跌破止损价', target = '涨到目标价' }
+
+local function diff_levels(old_a, new_a, out, rec)
+    local was, now = level_zone(old_a), level_zone(new_a)
+    -- Crossing IN only, as with the band: sitting in the zone is not news.
+    if not was or not now or was == now or now == 'none' then return end
+    local lv = new_a.levels
+    local date = new_a.valuation and new_a.valuation.date
+    local close = new_a.valuation and util_num(new_a.valuation.close)
+    local detail
+    if now == 'buy' then
+        detail = string.format('收盘 %.2f，买入%s（%s）', close,
+            lv.buy.low and string.format('区间 %.2f – %.2f', lv.buy.low, lv.buy.high)
+                or string.format('价 %.2f 以下', lv.buy.high),
+            lv.buy.basis or '')
+    elseif now == 'stop' then
+        detail = string.format('收盘 %.2f，止损价 %.2f（%s）', close, lv.stop.price, lv.stop.basis or '')
+    else
+        detail = string.format('收盘 %.2f，目标价 %.2f（%s）', close, lv.target.price, lv.target.basis or '')
+    end
+    local pos = new_a.watch and new_a.watch.position
+    if pos and util_num(pos.profit_pct) then
+        detail = detail .. string.format('；持仓成本 %.2f，浮动盈亏 %+.1f%%', pos.cost, pos.profit_pct)
+    end
+    out[#out + 1] = event(rec, 'level', now .. '|' .. tostring(date), {
+        title = ZONE_TITLE[now], detail = detail, date = date,
+        status = now == 'stop' and 'warn' or nil,
+    })
+end
+
+local TREND_TITLE = { bull = '均线转为多头排列', bear = '均线转为空头排列' }
+
+local function diff_trend(old_a, new_a, out, rec)
+    local ot = old_a.technical
+    local nt = new_a.technical
+    if not ot or not nt or ot.note or nt.note then return end
+    local was = ot.trend and ot.trend.alignment
+    local now = nt.trend and nt.trend.alignment
+    if not was or not now or was == now or not TREND_TITLE[now] then return end
+    out[#out + 1] = event(rec, 'trend', now .. '|' .. tostring(nt.as_of), {
+        title = TREND_TITLE[now],
+        detail = string.format('%s 收盘 %.2f，MA5 %.2f / MA10 %.2f / MA20 %.2f / MA60 %.2f',
+            nt.as_of, nt.close, nt.ma['5'] or 0, nt.ma['10'] or 0, nt.ma['20'] or 0, nt.ma['60'] or 0),
+        date = nt.as_of,
+        status = now == 'bear' and 'warn' or nil,
+    })
+end
+
 local function diff_checks(old_a, new_a, out, rec)
     local before = {}
     for _, c in ipairs(old_a.checks or {}) do before[c.key] = c.status end
@@ -175,8 +248,30 @@ local function diff_checks(old_a, new_a, out, rec)
     end
 end
 
+-- The last day the record has a price for, which is the day its analysis
+-- speaks about.
+local function as_of(rec)
+    local rows = type(rec.valuation) == 'table' and rec.valuation or {}
+    return rows[#rows] and rows[#rows].date or nil
+end
+
+-- The bars up to `date`. The old side of the comparison has to see the market
+-- as it was on its own day: judging yesterday's close against today's moving
+-- average would invent crossings that never happened.
+local function quotes_upto(quotes, date)
+    if type(quotes) ~= 'table' or type(quotes.rows) ~= 'table' or not date then return nil end
+    local rows = {}
+    for _, r in ipairs(quotes.rows) do
+        if r.date <= date then rows[#rows + 1] = r end
+    end
+    if #rows == 0 then return nil end
+    return { rows = rows, last_date = rows[#rows].date, fetched_at = quotes.fetched_at,
+             code = quotes.code, name = quotes.name }
+end
+
 -- old, new: stored records (engine/stock.lua). watch: the watchlist entry.
--- opts: { dcf = {...}, percentile_low = 10, percentile_high = 90 }
+-- opts: { dcf = {...}, levels = {...}, quotes = the cached bars,
+--         percentile_low = 10, percentile_high = 90 }
 -- Returns a list of events, oldest-first within each kind. A first fetch (no
 -- old record, or one without reports) has nothing to compare and returns none.
 function g_exports.events_diff(old, new, watch, opts)
@@ -187,11 +282,18 @@ function g_exports.events_diff(old, new, watch, opts)
     end
     diff_reports(old, new, out)
     diff_dividends(old, new, out)
-    local aopts = { dcf = opts.dcf }
-    local old_a = analysis_build(old, watch, aopts)
-    local new_a = analysis_build(new, watch, aopts)
+    local old_a = analysis_build(old, watch, { dcf = opts.dcf, levels = opts.levels,
+                                               quotes = quotes_upto(opts.quotes, as_of(old)) })
+    local new_a = analysis_build(new, watch, { dcf = opts.dcf, levels = opts.levels,
+                                               quotes = opts.quotes })
     diff_band(old_a, new_a, out, new)
     diff_percentile(old_a, new_a, out, new, opts)
     diff_checks(old_a, new_a, out, new)
+    -- Price alerts are for what is owned. Nothing above depends on this, so a
+    -- watchlist entry with no position produces exactly what it did before.
+    if watch and type(watch.position) == 'table' then
+        diff_levels(old_a, new_a, out, new)
+        diff_trend(old_a, new_a, out, new)
+    end
     return out
 end

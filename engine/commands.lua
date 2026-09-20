@@ -65,27 +65,30 @@ local function install_watchlist()
             code = code_param(),
             note = { type = 'string', doc = '备注' },
             band = { type = 'object', doc = '合理估值区间 {metric, low, high}' },
+            position = { type = 'object', doc = '持仓 {shares, cost}；设置后才推送点位与技术面提醒' },
         },
         handler = function(p)
             local code, err = security_code(p.code)
             if not code then return nil, 'bad_request', err end
-            return watch_add(code, { note = p.note, band = p.band })
+            return watch_add(code, { note = p.note, band = p.band, position = p.position })
         end,
     })
 
     api_define({
         name = 'watchlist.update', method = 'PATCH', path = '/api/v1/watchlist/:code',
-        summary = '修改备注或合理估值区间；传 null 清除',
+        summary = '修改备注、合理估值区间或持仓；传 null 清除',
         params = {
             code = code_param(),
             note = { type = 'string', nullable = true },
             band = { type = 'object', nullable = true,
                      doc = '{metric: pe_ttm|pb|ps_ttm|pcf_ttm, low, high}，字段为 null 表示清除' },
+            position = { type = 'object', nullable = true,
+                         doc = '{shares, cost}；设置后才推送点位与技术面提醒，null 表示清仓' },
         },
         handler = function(p)
             local code, err = security_code(p.code)
             if not code then return nil, 'bad_request', err end
-            return watch_update(code, { note = p.note, band = p.band })
+            return watch_update(code, { note = p.note, band = p.band, position = p.position })
         end,
     })
 

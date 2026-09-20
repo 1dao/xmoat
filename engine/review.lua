@@ -195,8 +195,12 @@ local function watchlist_rows()
             for _, m in ipairs((a.valuation and a.valuation.metrics) or {}) do
                 if m.key == (lv and lv.metric or 'pe_ttm') then pe = m.all and m.all.percentile end
             end
+            local pos = a.watch and a.watch.position
             out[#out + 1] = {
                 code = e.code, name = a.name,
+                held = pos ~= nil or nil,
+                cost = pos and util_num(pos.cost) or nil,
+                profit_pct = pos and util_num(pos.profit_pct) or nil,
                 date = last and last.date, close = close,
                 change_pct = last and util_num(last.change_pct),
                 percentile = pe,

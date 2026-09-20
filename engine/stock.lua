@@ -208,7 +208,11 @@ function g_exports.stock_refresh(code)
         local watch = watch_get(code)
         if watch then
             local eok, eerr = pcall(function()
-                alerts_record(events_diff(old, record, watch, stock_event_opts()))
+                local eopts = stock_event_opts()
+                -- The bars this refresh just extended: the level and trend
+                -- events are computed from them.
+                eopts.quotes = qdoc or quote_series(code, { offline = true })
+                alerts_record(events_diff(old, record, watch, eopts))
             end)
             if not eok then cfg_log_error('%s: event detection failed: %s', code, tostring(eerr)) end
         end
@@ -245,6 +249,7 @@ end
 function g_exports.stock_event_opts()
     return {
         dcf = dcf_params(),
+        levels = level_params(),
         percentile_low = cfg_num('ALERT_PERCENTILE_LOW', 10),
         percentile_high = cfg_num('ALERT_PERCENTILE_HIGH', 90),
     }
