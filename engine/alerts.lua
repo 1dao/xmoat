@@ -112,19 +112,25 @@ end
 -- `problems` is what the check could not fetch. It is sent even when nothing
 -- is pending: "no alerts" from a check that could not see is not the same
 -- news as "no alerts", and on a quiet day nothing else would say so.
+--
+-- The built-in rule's new finds (engine/signals.lua) go out the same way as
+-- events: whatever is waiting, once, in whichever digest leaves next.
 function g_exports.alerts_flush(opts)
     opts = opts or {}
     if flushing then return { sent = 0, busy = true, channels = util_json_array({}) } end
     local brief = opts.review and report_review_brief(opts.review) or nil
     local trouble = report_problems_brief(opts.problems)
+    local fresh = signals_pending()
+    local found = report_signals_brief(fresh, { max = cfg_int('SIGNALS_PUSH_MAX', 10) })
     local pending = alerts_pending()
-    if #pending == 0 and not trouble and not (brief and opts.review_alone) then
+    if #pending == 0 and not trouble and not found and not (brief and opts.review_alone) then
         return { sent = 0, channels = util_json_array({}) }
     end
 
     if #notify_channels() == 0 then
         for _, e in ipairs(pending) do e.pushed = 'skipped' end
         if #pending > 0 then save() end
+        signals_mark(fresh, 'skipped')
         return { sent = 0, skipped = true, channels = util_json_array({}) }
     end
 
@@ -135,6 +141,7 @@ function g_exports.alerts_flush(opts)
         -- was asked for at all, since the message is going out anyway.
         local tail = {}
         if trouble then tail[#tail + 1] = trouble end
+        if found then tail[#tail + 1] = found end
         if brief then tail[#tail + 1] = brief end
         local msg
         if #pending > 0 then
@@ -149,10 +156,12 @@ function g_exports.alerts_flush(opts)
                 msg.text = msg.text .. '\n\n' .. part
             end
         else
-            -- Nothing changed, but something could not be fetched, or the
-            -- review was asked for every trading day.
+            -- Nothing changed about the watchlist, but the rule found
+            -- something, or something could not be fetched, or the review was
+            -- asked for every trading day.
             local body = table.concat(tail, '\n\n')
-            msg = { title = trouble and 'xmoat 检查：有数据没取到'
+            msg = { title = found and string.format('xmoat 新突破 %d 只', #fresh)
+                        or trouble and 'xmoat 检查：有数据没取到'
                         or 'xmoat 收盘复盘 ' .. tostring(opts.review.as_of or util_today()),
                     markdown = body, text = body, events = {} }
         end
@@ -169,8 +178,11 @@ function g_exports.alerts_flush(opts)
             end
         end
         if #pending > 0 then save() end
+        signals_mark(fresh, delivered)
         return { sent = delivered and #pending or 0, review = brief ~= nil or nil,
-                 problems = trouble ~= nil or nil, channels = util_json_array(results) }
+                 problems = trouble ~= nil or nil,
+                 signals = (delivered and #fresh > 0) and #fresh or nil,
+                 channels = util_json_array(results) }
     end)
     flushing = false
     if not ok then
@@ -194,7 +206,7 @@ end
 -- refresh does), then push what is pending. The scheduled check and the
 -- "check now" command are both this. Returns
 --   { refreshed = { {code, ok, error?} }, new_events = n, push = <flush result>,
---     problems = { {kind, code?, name?, error} } }
+--     problems = { {kind, code?, name?, error} }, signals? = <signals_run result> }
 function g_exports.alerts_run()
     if running then return nil, 'conflict', '已有一次检查正在进行' end
     running = true
@@ -260,6 +272,21 @@ function g_exports.alerts_run()
             end
         end
 
+        -- The built-in rule over the whole market, after the close like the
+        -- rest of the check. What it finds is new once; only the new ones go
+        -- into this push. A failure is a missing section, not a missing check.
+        local signals
+        if signals_daily() then
+            local sok, sres, _, serr = pcall(signals_run, 'daily')
+            if sok and sres then
+                signals = sres
+            else
+                local why = sok and serr or sres
+                cfg_log_warn('built-in rule failed: %s', tostring(why))
+                problems[#problems + 1] = { kind = 'signals', error = tostring(why) }
+            end
+        end
+
         -- A background flush started by an earlier refresh may still be
         -- sending; it cannot see what this run recorded, and flushing now
         -- would only report busy and leave those alerts for tomorrow's check.
@@ -267,14 +294,16 @@ function g_exports.alerts_run()
         local push = alerts_flush({ review = review, review_alone = mode == 'always',
                                     problems = problems })
         return { refreshed = util_json_array(refreshed), new_events = doc.seq - seq_before,
-                 problems = util_json_array(problems), push = push }
+                 problems = util_json_array(problems), signals = signals, push = push }
     end)
     running = false
     if not ok then
         cfg_log_error('alerts run raised: %s', tostring(result))
         return nil, 'internal', '检查时出错'
     end
-    cfg_log_system('check finished: %d stock(s), %d new alert(s), %d pushed, %d data problem(s)',
-        #result.refreshed, result.new_events, result.push.sent or 0, #result.problems)
+    cfg_log_system('check finished: %d stock(s), %d new alert(s), %d pushed, %d data problem(s)%s',
+        #result.refreshed, result.new_events, result.push.sent or 0, #result.problems,
+        result.signals and string.format(', rule: %d found, %d new', result.signals.found,
+            result.signals.added) or '')
     return result
 end

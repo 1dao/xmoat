@@ -70,8 +70,10 @@
 | `strategy.sweep` | `GET /api/v1/strategy/sweep` | 同上，外加 `codes?` / `universe?` / `limit?` 与筛选条件 | `Sweep`：一组股票合在一起拟合 |
 | `strategy.attribute` | `GET /api/v1/strategy/attribute` | 同 scan，外加 `horizon?`，`min_signals?`，`group?` | 按行业/板块/地域分组，每组与自己的基准比 |
 | `groups.regions` | `GET /api/v1/groups/regions` | `refresh?`，`offline?` | 地域归属（31 个地域板块，约 5500 只），缓存 30 天 |
-| `strategy.scan` | `GET /api/v1/strategy/scan` | `rule?`，`ma_days?` 或 `ma_weeks?`，`flat_lookback?` 或 `flat_weeks?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
+| `strategy.scan` | `GET /api/v1/strategy/scan` | `rule?`，`ma_days?` 或 `ma_weeks?`，`flat_lookback?` 或 `flat_weeks?`，`above_pct?`，`flat_max?`，`days?`，`cooldown?`，`record?`，`codes?` / `universe?` / `limit?` | `Scan`：最近 `days` 个交易日里首次突破的股票 |
 | `strategy.rules` | `GET /api/v1/strategy/rules` | — | `Rule[]`：内置规则及其参数，默认值来自配置 |
+| `signals.list` | `GET /api/v1/signals` | `days?`（默认 30，按信号日），`limit?`（默认 500） | `SignalList`：内置规则的信号记录与之后的涨幅 |
+| `signals.run` | `POST /api/v1/signals/run` | — | 按默认参数把全市场跑一遍、记下新发现的并推送；收盘后的检查也做这件事 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
@@ -412,13 +414,18 @@ type Scan = {
   universe: string, checked: number, days: number,
   params: { ma_days: number, above_pct: number, flat_max: number,
             flat_lookback: number, min_day_gain: number,
+            cooldown: number,                 // 两次信号至少隔几个交易日；默认即只看突破第一天
             ma_weeks: number, flat_weeks: number },   // 同两个窗口，按周（一周 5 个交易日）
+  configured: boolean,                      // 参数就是内置默认（只有这样的结果会被记录）
+  recorded?: { added: number, pushing?: boolean, note?: string },   // 带 record 且 universe=market 时
   hits: {
     code: string, name?: string, industry?: string,
-    date: string, close: number, ma: number,
+    date: string, close: number, ma: number, // 信号日（突破第一天）与当天收盘
     above: number,                          // 高出均线 %
     slope: number,                          // 均线在 flat_lookback 内的变动 %
     day_gain?: number, bars_ago: number,    // 距今几个交易日
+    last_date: string, last_close: number,  // 最新一根 K 线
+    since_pct?: number,                     // 信号日以来涨了多少 %
     pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
   }[],                                      // 每只股票只留最近的一次
   skipped: { code: string, reason: string }[],
@@ -429,6 +436,25 @@ type Scan = {
 
 `fetch` 里，已经够新的缓存不论是哪个来源填的都算「本地」：扫描用通达信，
 也不会把自选股那份带换手率的东方财富日线换掉。
+
+```ts
+type SignalList = {
+  rule: 'breakout', title: string, days: number,
+  total: number, count: number,             // 这段时间里一共几条；这次返回了几条
+  daily: boolean,                           // 收盘后的检查会不会自动跑（SIGNALS_DAILY）
+  last_run?: { at: string, source: 'daily' | 'web' | 'manual', checked: number,
+               found: number, added: number, days: number },
+  items: {
+    code: string, name?: string, industry?: string,
+    signal_date: string, signal_close: number,   // 突破第一天
+    added_at: string, added_close: number,       // 记下来的时间，以及当时的最新收盘
+    last_date: string, last_close: number,       // 每次扫描顺手更新
+    since_signal_pct?: number, since_added_pct?: number,   // 读取时算
+    above?: number, day_gain?: number, pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+    pushed: boolean | 'skipped' | 'failed',
+  }[],                                      // 新的在前
+}
+```
 
 ### Review
 
@@ -529,13 +555,16 @@ type RunResult = {
     kind: 'refresh'                         // 这只自选股整个刷新失败
         | 'prices'                          // 刷新了，但两个行情源都没给出日线
         | 'index'                           // 复盘里的这个指数用的是缓存
-        | 'review',                         // 复盘没有生成
+        | 'review'                          // 复盘没有生成
+        | 'signals',                        // 内置规则没有运行
     code?: string, name?: string, error: string,
   }[],
+  signals?: { checked: number, found: number, added: number, days: number },   // 内置规则这次跑的结果
   push: {
     sent: number, skipped?: boolean, busy?: boolean,
     review?: true,                          // 这条推送里带了收盘复盘
     problems?: true,                        // 这条推送里列了没取到的数据
+    signals?: number,                       // 这条推送里带了几只新突破
     channels: PushResult[],
   },
 }

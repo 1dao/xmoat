@@ -652,6 +652,10 @@ local function strategy_params(with_grid)
         p.flat_max = { type = 'number', doc = '走平容忍度 %，默认 BREAKOUT_FLAT_MAX（1）' }
         p.days = { type = 'integer', doc = '最近几个交易日内出现的信号都算，默认 1' }
         p.rule = { type = 'string', enum = { 'breakout' }, doc = '内置规则，见 strategy.rules；默认 breakout' }
+        p.cooldown = { type = 'integer',
+                       doc = '两次信号至少隔几个交易日，默认 BACKTEST_COOLDOWN（20），即只看突破第一天；1 = 条件成立的每一天' }
+        p.record = { type = 'boolean',
+                     doc = '按内置默认参数扫描时，把新发现的记入信号记录（signals.list）并推送' }
     end
     return p
 end
@@ -826,12 +830,30 @@ local function install_strategy()
             if p.flat_max and (p.flat_max < 0 or p.flat_max > 20) then
                 return nil, 'bad_request', 'flat_max 应在 0 到 20 之间'
             end
+            if p.cooldown and (p.cooldown < 1 or p.cooldown > 250) then
+                return nil, 'bad_request', 'cooldown 应在 1 到 250 之间'
+            end
             local opts = strategy_common(p)
             opts.ma_days, opts.above_pct, opts.flat_max = p.ma_days, p.above_pct, p.flat_max
             opts.ma_weeks, opts.flat_weeks = p.ma_weeks, p.flat_weeks
-            opts.days = p.days
+            opts.days, opts.cooldown = p.days, p.cooldown
+            -- A scan of the rule as configured over the whole market is the same
+            -- thing the daily check runs: it keeps its finds, and the new ones
+            -- are pushed. A variation being tried out is only shown.
+            local keep = p.record and opts.universe == 'market'
+            if keep then opts.on_bars = signals_price_updater() end
             local res, ecode, emsg = strategy_scan(opts)
             if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
+            if keep then
+                if res.configured then
+                    res.recorded = { added = signals_record(res, 'web'),
+                                     pushing = #notify_channels() > 0 }
+                    if res.recorded.added > 0 then alerts_flush_later() end
+                else
+                    signals_save()
+                    res.recorded = { added = 0, note = '参数和内置默认不同，这次的结果不记入信号记录' }
+                end
+            end
             return res
         end,
     })
@@ -840,6 +862,35 @@ local function install_strategy()
         name = 'strategy.rules', method = 'GET', path = '/api/v1/strategy/rules',
         summary = '内置的选股规则，以及它们的参数和当前默认值（来自配置）',
         handler = function() return strategy_rules() end,
+    })
+
+    api_define({
+        name = 'signals.list', method = 'GET', path = '/api/v1/signals',
+        summary = '内置规则的信号记录：每只首日突破的发现时间、价格，以及之后涨了多少',
+        params = {
+            days = { type = 'integer', doc = '最近多少天的信号（按信号日），默认 30' },
+            limit = { type = 'integer', doc = '最多返回多少条，默认 500' },
+        },
+        handler = function(p)
+            if p.days and (p.days < 1 or p.days > 3650) then
+                return nil, 'bad_request', 'days 应在 1 到 3650 之间'
+            end
+            if p.limit and (p.limit < 1 or p.limit > 5000) then
+                return nil, 'bad_request', 'limit 应在 1 到 5000 之间'
+            end
+            return signals_list({ days = p.days, limit = p.limit })
+        end,
+    })
+
+    api_define({
+        name = 'signals.run', method = 'POST', path = '/api/v1/signals/run',
+        summary = '现在就按内置默认参数把全市场跑一遍，记下新发现的并推送；每日检查也做这件事',
+        handler = function()
+            local res, ecode, emsg = signals_run('manual')
+            if not res then return nil, ecode or 'internal', emsg or '运行失败' end
+            if res.added > 0 then alerts_flush_later() end
+            return res
+        end,
     })
 end
 

@@ -1116,11 +1116,14 @@
 
   // Each rule's last numbers, for this browser only.
   const RULES_KEY = 'xmoat.rules';
+  const SIGNAL_DAYS_KEY = 'xmoat.signals.days';
   // Each rule's last result, for coming back to the tab without another scan.
   const lastScan = {};
 
   // A count said in weeks may be 8 or 8.4; either reads as written.
   const fmtCount = v => (isNum(v) ? fmtNum(v, Number.isInteger(v) ? 0 : 1) : '—');
+  // A gain reads as a change, so it carries its sign.
+  const fmtGain = v => (isNum(v) ? (v > 0 ? '+' : '') + fmtPct(v) : '—');
 
   function ruleCard(rule, token) {
     const savedAll = (() => {
@@ -1144,7 +1147,10 @@
     const results = h('section', { class: 'card' });
     const kept = lastScan[rule.id];
     if (kept) showScan(results, kept.res, kept.at);
-    else results.append(h('p', { class: 'muted', text: '点“筛选全市场”，在全部 A 股（不含 ST）里找现在正在发这个信号的股票。' }));
+    else results.append(h('p', { class: 'muted', text:
+      '点“筛选全市场”，在全部 A 股（不含 ST）里找刚刚首次突破的股票。用默认参数时，结果会记进下面的信号记录。' }));
+
+    const record = signalsCard(token);
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
@@ -1156,11 +1162,13 @@
       savedAll[rule.id] = q;
       storage(s => s.setItem(RULES_KEY, JSON.stringify(savedAll)));
       await busy(run, '全市场扫描中…', async () => {
-        const res = await api('GET', '/api/v1/strategy/scan?' +
-          new URLSearchParams({ rule: rule.id, universe: 'market', limit: '6000', ...q }).toString());
+        const res = await api('GET', '/api/v1/strategy/scan?' + new URLSearchParams(
+          { rule: rule.id, universe: 'market', limit: '6000', record: 'true', ...q }).toString());
         lastScan[rule.id] = { res, at: new Date().toISOString() };
         if (stale(token)) return;
         showScan(results, res, lastScan[rule.id].at);
+        // New finds, and the latest closes of the old ones, which the scan moved.
+        if (res.recorded) record.reload();
       });
     });
     reset.addEventListener('click', () => {
@@ -1176,6 +1184,7 @@
         form,
         h('p', { class: 'muted small mt', text: rule.basis })),
       results,
+      record.node,
     ];
   }
 
@@ -1187,8 +1196,10 @@
     box.textContent = '';
     const p = res.params || {};
     const f = res.fetch || {};
+    // One day's window: every hit broke out today, so "since" is nothing yet.
+    const since = res.days > 1;
     box.append(h('div', { class: 'card-head' },
-      h('h2', { text: `${res.hits.length} 只在发信号` }),
+      h('h2', { text: `${res.hits.length} 只首次突破` }),
       h('span', { class: 'muted', text:
         `看了 ${res.checked} 只 · ${fmtCount(p.ma_weeks)} 周均线 + ${fmtPct(p.above_pct)}` +
         ` · 前 ${fmtCount(p.flat_weeks)} 周走平（±${fmtPct(p.flat_max)}）` +
@@ -1197,23 +1208,30 @@
       h('span', { class: 'muted small', text: '扫描于 ' + fmtTime(at) })));
     if (!res.hits.length) {
       box.append(h('p', { class: 'muted', text:
-        '现在没有股票在发这个信号。可以把“信号出现在最近”放宽到 3–5 个交易日再看。' }));
+        '没有股票刚刚首次突破。可以把“首次突破在最近”放宽到 3–5 个交易日再看。' }));
     } else {
       box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
         h('thead', {}, h('tr', {},
           h('th', { text: '股票' }), h('th', { text: '信号日' }),
           h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '均线' }),
           h('th', { class: 'r', text: '高出' }), h('th', { class: 'r', text: '均线变动' }),
-          h('th', { class: 'r', text: '当日涨幅' }), h('th', { class: 'r', text: '市值' }),
+          h('th', { class: 'r', text: '当日涨幅' }),
+          since && h('th', { class: 'r', text: '信号日以来' }),
+          h('th', { class: 'r', text: '市值' }),
           h('th', { class: 'r', text: 'PE(TTM)' }), h('th', { class: 'r', text: 'ROE' }),
           h('th', { text: '' }))),
-        h('tbody', {}, res.hits.slice(0, SCAN_ROWS).map(scanRow)))));
+        h('tbody', {}, res.hits.slice(0, SCAN_ROWS).map(r => scanRow(r, since))))));
       if (res.hits.length > SCAN_ROWS) {
         box.append(h('p', { class: 'muted small', text:
           `只列出前 ${SCAN_ROWS} 只（最新的信号、高出均线最多的在前）。` }));
       }
     }
     const lines = [];
+    if (res.recorded) {
+      lines.push(res.recorded.note || (res.recorded.added === 0 ? '都已在信号记录里，没有新的。'
+        : `新记入信号记录 ${res.recorded.added} 只` +
+          (res.recorded.pushing ? '，正在推送。' : '；没有配置推送渠道，所以不推送。')));
+    }
     if (isNum(f.total)) {
       lines.push(`行情：本地 ${f.cached} 只，新抓 ${f.fetched} 只` +
         (f.failed && f.failed.length ? `，失败 ${f.failed.length} 只` : '') +
@@ -1226,22 +1244,108 @@
     for (const line of lines) box.append(h('p', { class: 'muted small', text: line }));
   }
 
-  function scanRow(r) {
+  function scanRow(r, since) {
     const open = () => { location.hash = '#/stock/' + r.code; };
     return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
       h('td', { class: 'col-name' }, h('span', { class: 'name', text: r.name || r.code }), ' ',
         h('span', { class: 'code', text: r.code }),
         h('span', { class: 'sub', text: r.industry || '' })),
-      h('td', { 'data-label': '信号日', text: r.date + (r.bars_ago > 0 ? `（${r.bars_ago} 天前）` : '') }),
+      h('td', { class: 'date', 'data-label': '信号日', text: r.date + (r.bars_ago > 0 ? `（${r.bars_ago} 天前）` : '') }),
       h('td', { class: 'r num', 'data-label': '收盘', text: fmtNum(r.close) }),
       h('td', { class: 'r num', 'data-label': '均线', text: fmtNum(r.ma) }),
       h('td', { class: 'r num', 'data-label': '高出', text: fmtPct(r.above) }),
       h('td', { class: 'r num', 'data-label': '均线变动', text: fmtPct(r.slope) }),
       h('td', { class: 'r num', 'data-label': '当日涨幅', text: fmtPct(r.day_gain) }),
+      since && h('td', { class: 'r num', 'data-label': '信号日以来', text: fmtGain(r.since_pct) }),
       h('td', { class: 'r num', 'data-label': '市值', text: fmtMoney(r.market_cap) }),
       h('td', { class: 'r num', 'data-label': 'PE(TTM)', text: fmtNum(r.pe_ttm, 1) }),
       h('td', { class: 'r num', 'data-label': 'ROE', text: fmtPct(r.roe) }),
       h('td', { class: 'r col-actions' }, watchButton(r)));
+  }
+
+  // What the rule found on earlier days, and what became of it. Kept by the
+  // engine (signals.list): the daily check adds to it after every close, and
+  // so does a scan here at the default numbers.
+  const SIGNAL_WINDOWS = [[7, '近一周'], [30, '近一月'], [90, '近三月']];
+  const RUN_SOURCE = { daily: '收盘后的检查', web: '网页', manual: '手动运行' };
+
+  function signalsCard(token) {
+    const box = h('section', { class: 'card' });
+    let days = Number(storage(s => s.getItem(SIGNAL_DAYS_KEY))) || 30;
+
+    async function load() {
+      let res;
+      try { res = await api('GET', '/api/v1/signals?days=' + days); }
+      catch (e) {
+        if (stale(token)) return;
+        box.textContent = '';
+        box.append(h('p', { class: 'muted', text: '信号记录读取失败：' + e.message }));
+        return;
+      }
+      if (stale(token)) return;
+      render(res);
+    }
+
+    function render(res) {
+      box.textContent = '';
+      const seg = h('div', { class: 'seg', role: 'group', 'aria-label': '时间范围' });
+      for (const [value, label] of SIGNAL_WINDOWS) {
+        seg.append(h('button', { type: 'button', text: label, 'aria-pressed': String(days === value),
+          onclick: () => {
+            days = value;
+            storage(s => s.setItem(SIGNAL_DAYS_KEY, String(value)));
+            load();
+          } }));
+      }
+      box.append(h('div', { class: 'card-head' },
+        h('h2', { text: '信号记录' }),
+        h('span', { class: 'muted', text: `${res.total} 只 · 按信号日，新的在前` }),
+        h('span', { class: 'spacer' }), seg));
+
+      const run = res.last_run;
+      box.append(h('p', { class: 'muted small', text:
+        (res.daily ? '每个交易日收盘后的检查会用默认参数跑一遍全市场，新加入的会推送。'
+          : '每日自动运行已关闭（SIGNALS_DAILY=0）。') +
+        (run ? `上次运行：${fmtTime(run.at)}，${RUN_SOURCE[run.source] || run.source}，` +
+          `新增 ${run.added} 只。` : '') }));
+
+      if (!res.items.length) {
+        box.append(h('p', { class: 'muted', text:
+          '这段时间里还没有记录。用默认参数点一次“筛选全市场”，或者等收盘后的检查。' }));
+        return;
+      }
+      box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
+        h('thead', {}, h('tr', {},
+          h('th', { text: '股票' }), h('th', { text: '信号日' }), h('th', { text: '加入' }),
+          h('th', { class: 'r', text: '信号日收盘' }), h('th', { class: 'r', text: '最新' }),
+          h('th', { class: 'r', text: '信号日以来' }), h('th', { class: 'r', text: '加入以来' }),
+          h('th', { class: 'r', text: 'ROE' }), h('th', { text: '' }))),
+        h('tbody', {}, res.items.map(signalRow)))));
+      if (res.count < res.total) {
+        box.append(h('p', { class: 'muted small', text: `只列出最新的 ${res.count} 只。` }));
+      }
+    }
+
+    box.append(h('p', { class: 'muted', text: '加载信号记录…' }));
+    load();
+    return { node: box, reload: load };
+  }
+
+  function signalRow(s) {
+    const open = () => { location.hash = '#/stock/' + s.code; };
+    return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
+      h('td', { class: 'col-name' }, h('span', { class: 'name', text: s.name || s.code }), ' ',
+        h('span', { class: 'code', text: s.code }),
+        h('span', { class: 'sub', text: s.industry || '' })),
+      h('td', { class: 'date', 'data-label': '信号日', text: s.signal_date }),
+      h('td', { class: 'date', 'data-label': '加入', text: fmtTime(s.added_at) }),
+      h('td', { class: 'r num', 'data-label': '信号日收盘', text: fmtNum(s.signal_close) }),
+      h('td', { class: 'r num date', 'data-label': '最新' },
+        fmtNum(s.last_close), h('span', { class: 'sub', text: s.last_date || '' })),
+      h('td', { class: 'r num', 'data-label': '信号日以来', text: fmtGain(s.since_signal_pct) }),
+      h('td', { class: 'r num', 'data-label': '加入以来', text: fmtGain(s.since_added_pct) }),
+      h('td', { class: 'r num', 'data-label': 'ROE', text: fmtPct(s.roe) }),
+      h('td', { class: 'r col-actions' }, watchButton(s)));
   }
 
   function screenRow(r) {

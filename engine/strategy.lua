@@ -330,18 +330,27 @@ function g_exports.strategy_rules()
                   min = 0, max = 20, step = 0.5 },
                 { name = 'min_day_gain', label = '当天至少涨', unit = '%', default = d.min_day_gain,
                   min = 0, max = 20, step = 0.5 },
-                { name = 'days', label = '信号出现在最近', unit = '个交易日内', default = 1,
+                { name = 'days', label = '首次突破在最近', unit = '个交易日内', default = 1,
                   min = 1, max = 20, step = 1 },
             }),
         },
     })
 end
 
--- COROUTINE-ONLY. Which stocks are firing the rule right now.
+-- COROUTINE-ONLY. Which stocks broke out just now.
+--
+-- A signal is the FIRST day of a breakout, as in the backtest the rule's
+-- numbers were fitted on: an entry, then nothing for `cooldown` trading days
+-- however long the condition holds. Listing every day it holds instead would
+-- put the stock that broke out a week ago, 40% above its average by now, at
+-- the top of the list — a chase, and not what the fitted edge was measured on.
 --
 -- opts adds { days = 1 }: how many of the most recent bars count as "now", so
--- a signal from two days ago is still findable on a Wednesday morning — and
--- { ma_weeks, flat_weeks }, the same two windows said in weeks.
+-- a breakout from two days ago is still findable on a Wednesday morning, with
+-- how far it has gone since; { ma_weeks, flat_weeks }, the same two windows
+-- said in weeks; { cooldown }, 1 for "every day the condition holds"; and
+-- { on_bars = fn(code, bars) }, called with each stock's bars as they are read,
+-- for a caller keeping its own prices current without reading them again.
 function g_exports.strategy_scan(opts)
     opts = util_copy(opts)
     local days = math.max(1, math.min(opts.days or 1, 20))
@@ -352,6 +361,17 @@ function g_exports.strategy_scan(opts)
     end
     if not opts.flat_lookback and opts.flat_weeks then
         opts.flat_lookback = math.floor(opts.flat_weeks * wk + 0.5)
+    end
+    local p = {
+        ma_days = opts.ma_days or d.ma_days, above_pct = opts.above_pct or d.above_pct,
+        flat_max = opts.flat_max or d.flat_max, flat_lookback = opts.flat_lookback or d.flat_lookback,
+        min_day_gain = opts.min_day_gain or d.min_day_gain, cooldown = opts.cooldown or d.cooldown,
+    }
+    -- The rule as configured, rather than a variation of it being tried out:
+    -- only that is worth keeping a record of (engine/signals.lua).
+    local configured = true
+    for k, v in pairs(p) do
+        if v ~= d[k] then configured = false end
     end
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
@@ -364,22 +384,19 @@ function g_exports.strategy_scan(opts)
         -- now and then, so the rest of the page still answers meanwhile.
         if i % 200 == 0 then sched_sleep(1) end
         local px, why = bars_for(item.code, opts)
-        if not px or #px < (opts.ma_days or d.ma_days) + (opts.flat_lookback or d.flat_lookback) + 1 then
+        if px and opts.on_bars then opts.on_bars(item.code, px) end
+        if not px or #px < p.ma_days + p.flat_lookback + 1 then
             skipped[#skipped + 1] = { code = item.code,
                                       reason = px and '日线太短' or tostring(why) }
         else
             checked = checked + 1
-            -- cooldown 1: a scan asks "is it firing", not "how often has it".
             local found = backtest_breakout(px, {
-                ma_days = opts.ma_days or d.ma_days,
-                flat_lookback = opts.flat_lookback or d.flat_lookback,
-                flat_max = opts.flat_max or d.flat_max,
-                above_pct = opts.above_pct or d.above_pct,
-                min_day_gain = opts.min_day_gain, cooldown = 1,
+                ma_days = p.ma_days, flat_lookback = p.flat_lookback, flat_max = p.flat_max,
+                above_pct = p.above_pct, min_day_gain = p.min_day_gain, cooldown = p.cooldown,
             })
-            -- The newest signal per stock and no more: with a window of
-            -- several days the same breakout otherwise appears once a day,
-            -- which reads as several opportunities and is one.
+            -- The newest signal per stock and no more. With a cooldown of one
+            -- and a window of several days, the same breakout would otherwise
+            -- appear once a day, which reads as several opportunities and is one.
             local newest
             for _, e in ipairs(found.entries) do
                 if e.index > #px - days and (not newest or e.index > newest.index) then
@@ -387,11 +404,15 @@ function g_exports.strategy_scan(opts)
                 end
             end
             if newest then
+                local last = px[#px]
+                local now = util_num(last.close)
                 hits[#hits + 1] = {
                     code = item.code, name = item.name, industry = item.industry,
                     date = newest.date, close = newest.close, ma = newest.ma,
                     above = newest.above, slope = newest.slope, day_gain = newest.day_gain,
                     bars_ago = #px - newest.index,
+                    last_date = last.date, last_close = now,
+                    since_pct = (now and newest.close > 0) and (now / newest.close - 1) * 100 or nil,
                     pe_ttm = item.pe_ttm, pb = item.pb, roe = item.roe,
                     market_cap = item.market_cap,
                 }
@@ -409,14 +430,10 @@ function g_exports.strategy_scan(opts)
             hit.name = rec and rec.name or nil
         end
     end
+    p.ma_weeks, p.flat_weeks = weeks(p.ma_days), weeks(p.flat_lookback)
     return {
         universe = kind, checked = checked, days = days, fetch = fetch,
-        params = { ma_days = opts.ma_days or d.ma_days, above_pct = opts.above_pct or d.above_pct,
-                   flat_max = opts.flat_max or d.flat_max,
-                   flat_lookback = opts.flat_lookback or d.flat_lookback,
-                   min_day_gain = opts.min_day_gain or d.min_day_gain,
-                   ma_weeks = weeks(opts.ma_days or d.ma_days),
-                   flat_weeks = weeks(opts.flat_lookback or d.flat_lookback) },
+        params = p, configured = configured,
         hits = util_json_array(hits), skipped = util_json_array(skipped),
         note = '这是信号，不是结论：它只说价格从一个平台上走了出来，' ..
                '这家公司值不值得买仍然要看财报、估值和检查清单。',

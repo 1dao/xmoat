@@ -26,6 +26,8 @@ function g_exports.engine_start(opts)
     if not ok then return nil, 'watchlist: ' .. tostring(err) end
     ok, err = alerts_load()
     if not ok then return nil, 'alerts: ' .. tostring(err) end
+    ok, err = signals_load()
+    if not ok then return nil, 'signals: ' .. tostring(err) end
     ok, err = market_load()
     if not ok then return nil, 'market: ' .. tostring(err) end
     sched_start(cfg_int('SCHED_TICK_MS', 20))

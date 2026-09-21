@@ -310,6 +310,8 @@ pre.raw { white-space: pre-wrap; font-size: 12px; background: var(--surface-2); 
 .checks-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-height: 34px; }
 .check { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); font-size: 13px; }
 .screen-tabs { margin-bottom: 12px; }
+/* A date broken over two lines reads as two numbers. */
+td.date { white-space: nowrap; }
 .check input { margin: 0; }
 
 /* ── alerts ──────────────────────────────────────────────────────────────── */

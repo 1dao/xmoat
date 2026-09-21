@@ -4,7 +4,7 @@
 --          report_events_markdown, report_events_text,
 --          report_review_markdown, report_backtest_markdown,
 --          report_review_brief, report_sweep_markdown, report_scan_markdown,
---          report_attribute_markdown, report_problems_brief
+--          report_attribute_markdown, report_problems_brief, report_signals_brief
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -412,24 +412,30 @@ function g_exports.report_scan_markdown(r)
 
     f('# 信号扫描：%d 日均线走平 + 突破 %s', p.ma_days or 0, report_pct(p.above_pct, 1))
     line()
-    f('范围：%s，看了 %d 只；走平容忍 %s（%d 个交易日内）；最近 %d 个交易日内的信号都算%s',
+    f('范围：%s，看了 %d 只；走平容忍 %s（%d 个交易日内）；%s%s',
         r.universe or '—', r.checked or 0, report_pct(p.flat_max, 1), p.flat_lookback or 0,
-        r.days or 1,
+        (p.cooldown or 1) > 1
+            and string.format('最近 %d 个交易日内首次突破的（两次信号至少隔 %d 个交易日）', r.days or 1, p.cooldown)
+            or string.format('最近 %d 个交易日内条件成立的', r.days or 1),
         (p.min_day_gain or 0) > 0 and string.format('；当天涨幅需 ≥ %s', report_pct(p.min_day_gain, 1)) or '')
     line()
     if #(r.hits or {}) == 0 then
         line('没有股票在发信号。')
     else
-        line('| 代码 | 名称 | 日期 | 收盘 | 均线 | 高出 | 均线斜率 | 当日涨幅 | PE | ROE |')
-        line('|---|---|---|---|---|---|---|---|---|---|')
+        line('| 代码 | 名称 | 信号日 | 收盘 | 均线 | 高出 | 均线斜率 | 当日涨幅 | 信号日以来 | PE | ROE |')
+        line('|---|---|---|---|---|---|---|---|---|---|---|')
         for _, x in ipairs(r.hits) do
-            f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
+            f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
                 x.date, num(x.close), num(x.ma), report_pct(x.above, 1),
-                report_pct(x.slope, 1), report_pct(x.day_gain, 1),
+                report_pct(x.slope, 1), report_pct(x.day_gain, 1), report_pct(x.since_pct, 1),
                 num(x.pe_ttm, 1), report_pct(x.roe, 1))
         end
     end
     line()
+    if r.recorded then
+        f(r.recorded.note and '- %s' or '- 记入信号记录：新增 %s 只', r.recorded.note or r.recorded.added)
+        line()
+    end
     if #(r.skipped or {}) > 0 then
         f('跳过 %d 只：%s', #r.skipped, (function()
             local out = {}
@@ -465,7 +471,8 @@ local function clip(s, max)
     return s:sub(1, cut) .. '…'
 end
 
-local PROBLEM = { prices = '日线', refresh = '刷新失败', index = '指数日线', review = '复盘没有生成' }
+local PROBLEM = { prices = '日线', refresh = '刷新失败', index = '指数日线', review = '复盘没有生成',
+                  signals = '内置规则没有运行' }
 
 -- What a check could not fetch, as a few lines for the push. A check that
 -- finds nothing and a check that could not look both end with no alerts;
@@ -483,6 +490,45 @@ function g_exports.report_problems_brief(problems)
     if judged then
         L[#L + 1] = '这些股票的价位和均线提醒是按已有的数据判断的；取到之后，这期间的变化会在下一次检查里补上。'
     end
+    return table.concat(L, '\n')
+end
+
+-- The built-in rule's new finds, for the push. A day can bring sixty of them
+-- and the message is 2,000 bytes, so it lists `max` and counts the rest. The
+-- listed ones are the most profitable businesses first: this is a tool for
+-- owning companies, and a breakout is a question about the price of one that
+-- is already worth owning — the rest are on the screen page.
+function g_exports.report_signals_brief(items, opts)
+    if type(items) ~= 'table' or #items == 0 then return nil end
+    opts = opts or {}
+    local max = opts.max or 10
+    local sorted = {}
+    for i, s in ipairs(items) do sorted[i] = s end
+    table.sort(sorted, function(a, b)
+        local ra, rb = util_num(a.roe), util_num(b.roe)
+        if ra and rb and ra ~= rb then return ra > rb end
+        if (ra == nil) ~= (rb == nil) then return ra ~= nil end
+        return tostring(a.code) < tostring(b.code)
+    end)
+    local newest = ''
+    for _, s in ipairs(items) do
+        if tostring(s.signal_date) > newest then newest = tostring(s.signal_date) end
+    end
+    local L = { string.format('**新突破 %d 只**（突破横盘周线，%s）', #items,
+        #items > max and string.format('按 ROE 列前 %d', max) or '按 ROE 排') }
+    for i = 1, math.min(max, #sorted) do
+        local s = sorted[i]
+        -- A find from an earlier day (a check was missed) says which day.
+        local day = tostring(s.signal_date) ~= newest
+            and string.format('（%s）', tostring(s.signal_date):sub(6)) or ''
+        L[#L + 1] = string.format('- %s（%s%s）%s：收盘 %s，高出均线 %s，ROE %s', s.name or s.code,
+            s.code, s.industry and ('，' .. s.industry) or '', day, num(s.signal_close),
+            report_pct(s.above, 1), report_pct(s.roe, 1))
+    end
+    if #items > max then
+        L[#L + 1] = string.format('其余 %d 只见网页「筛选 → 内置规则」。', #items - max)
+    end
+    L[#L + 1] = '是价格信号，不是结论：公司值不值得买，还要看财报、估值和检查清单。'
     return table.concat(L, '\n')
 end
 

@@ -1868,7 +1868,103 @@ local function test_market()
         { universe = 'market', ma_days = 40, ma_weeks = 8, offline = true }).error.code, 'bad_request')
     eq('an unknown rule is refused', api_call('strategy.scan',
         { rule = 'nope', universe = 'market', offline = true }).error.code, 'bad_request')
+
+    -- 甲公司 again, but the break came two days ago and it has kept going:
+    -- 104, 105, 106. Only the first of those days is the signal.
+    local function seed(code, closes)
+        local rows = {}
+        local n = 200 + #closes
+        for i = 1, n do
+            local c = i <= 200 and 100 or closes[i - 200]
+            local prev = i > 1 and (i - 1 <= 200 and 100 or closes[i - 201]) or c
+            rows[i] = { date = util_date_add_days(today, i - n), open = c, close = c, high = c,
+                        low = c, change_pct = (c / prev - 1) * 100 }
+        end
+        store_save('quote:' .. code, { version = 1, code = code, kind = 'stock', adjust = 'qfq',
+            source = 'tdx', fetched_at = util_now_iso(), first_date = rows[1].date,
+            last_date = today, rows = util_json_array(rows) })
+    end
+    seed('600001', { 104, 105, 106 })
+    seed('300002', { 100 })
+    local function scan_of(extra)
+        local q = { universe = 'market', limit = 6000, offline = true }
+        for k, v in pairs(extra or {}) do q[k] = v end
+        local r = api_call('strategy.scan', q)
+        return r.ok and r.data or { hits = {}, error = r.error }
+    end
+    eq('a breakout two days old is not today\'s signal', #scan_of().hits, 0)
+    local recent = scan_of({ days = 5 }).hits[1]
+    eq('within five days it is found', recent and recent.code, '600001')
+    eq('on its first day', recent and recent.bars_ago, 2)
+    near('with how far it has gone since', recent and recent.since_pct, (106 / 104 - 1) * 100, 1e-6)
+    eq('and today\'s close beside it', recent and recent.last_close, 106)
+    eq('every day the condition holds, when asked for', #scan_of({ cooldown = 1 }).hits, 1)
+
+    -- Kept: the rule as configured, found once, with the price it was found at.
+    __signals_set_daily(true)
+    local pushes = {}
+    __net_set_transport(function(url, opts)
+        if url:find('wecom.test', 1, true) then
+            pushes[#pushes + 1] = util_json_decode(opts.body).markdown.content
+            return { status = 200, body = '{"errcode":0,"errmsg":"ok"}' }
+        end
+        return fixture_transport(url, opts)
+    end)
+    __notify_set_channels({ { kind = 'wecom', name = '企业微信', conf = { url = 'https://wecom.test/send?key=k' } } })
+    local kept = scan_of({ days = 5, record = true })
+    eq('a scan of the rule as configured keeps what it found', kept.recorded and kept.recorded.added, 1)
+    sched_wait_until(function() return #pushes > 0 end, 3000)
+    check('and the new one is pushed', pushes[1] and pushes[1]:find('新突破 1 只', 1, true)
+        and pushes[1]:find('甲公司', 1, true), pushes[1])
+    eq('found again, it is not kept twice', scan_of({ days = 5, record = true }).recorded.added, 0)
+    local tried = scan_of({ days = 5, record = true, above_pct = 2 })
+    eq('a variation being tried out is not kept', tried.recorded and tried.recorded.added, 0)
+    check('and says so', tried.recorded and tried.recorded.note ~= nil)
+
+    local list = api_call('signals.list', {})
+    local s1 = list.ok and list.data.items[1] or {}
+    eq('the record lists it', list.ok and list.data.count, 1)
+    eq('by its signal day', s1.signal_date, util_date_add_days(today, -2))
+    near('with the gain since that day', s1.since_signal_pct, (106 / 104 - 1) * 100, 1e-6)
+    near('and since it was added, at today\'s close', s1.since_added_pct, 0, 1e-9)
+    check('stamped with when it was added', type(s1.added_at) == 'string')
+
+    -- A later day: 甲公司 closes higher, 乙公司 breaks out. The daily check
+    -- keeps the new one and pushes only it; the old one's price moves on.
+    seed('600001', { 104, 105, 106, 110 })
+    seed('300002', { 100, 100, 100, 104 })
+    pushes = {}
+    local run = api_call('alerts.run')
+    check('the check runs the rule', run.ok and run.data.signals ~= nil,
+        run.ok and util_json_encode(run.data.problems) or (run.error and run.error.message))
+    eq('and keeps the one new find', run.ok and run.data.signals and run.data.signals.added, 1)
+    local body = pushes[#pushes] or ''
+    check('which is what the push carries', body:find('乙公司', 1, true), body)
+    check('and nothing it carried before', not body:find('甲公司', 1, true), body)
+    local after = api_call('signals.list', {}).data.items
+    local old
+    for _, s in ipairs(after) do if s.code == '600001' then old = s end end
+    near('the earlier find follows the price', old and old.since_signal_pct, (110 / 104 - 1) * 100, 1e-6)
+    near('from when it was added too', old and old.since_added_pct, (110 / 106 - 1) * 100, 1e-6)
+    pushes = {}
+    alerts_flush()
+    eq('with nothing new, nothing more is pushed', #pushes, 0)
+
+    -- A wider window adds older breakouts after newer ones; the record still
+    -- reads by signal day.
+    signals_record({ configured = true, checked = 1, days = 10, hits = { {
+        code = '600002', name = '丙公司', date = util_date_add_days(today, -9), close = 10,
+        last_close = 11, last_date = today } } }, 'test')
+    local ordered = signals_list({}).items
+    eq('added last, an older breakout still lists after the newer ones',
+        ordered[#ordered] and ordered[#ordered].code, '600002')
+    signals_mark(signals_pending(), 'skipped')
+
+    __notify_set_channels(nil)
+    __net_set_transport(nil)
+    __signals_set_daily(false)
     util_file_remove(store_dir() .. '/quotes/600001.json')
+    util_file_remove(store_dir() .. '/quotes/300002.json')
 end
 
 -- ── Phase 5: the insurance and broker templates ─────────────────────────────
@@ -2151,7 +2247,7 @@ local DATA = 'tmp/unit-data'
 local function clean()
     for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
                          'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json',
-                         'market.json' }) do
+                         'market.json', 'signals.json', 'quotes/600001.json', 'quotes/300002.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -2206,6 +2302,9 @@ return {
             return
         end
         http_install_api()
+        -- The daily check's whole-market rule is not what a test of the
+        -- watchlist asks; test_market turns it on for its own section.
+        __signals_set_daily(false)
         -- On a coroutine: refresh paces its requests with sched_sleep.
         sched_spawn('unit', function()
             local okr, e = xpcall(run_all, debug.traceback)

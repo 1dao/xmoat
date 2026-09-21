@@ -183,6 +183,15 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   no client carries its own copy of the fitted numbers. A scan of the whole
   market hands the thread back every 200 stocks; the host serves everything
   else from that same thread.
+- A scan's signal is the FIRST day of a breakout (`cooldown` =
+  BACKTEST_COOLDOWN), the unit the defaults were fitted on; `cooldown=1` is
+  "every day it holds", which ranks last week's chase first.
+- `engine/signals.lua` keeps what the rule as configured found
+  (`scan.configured`): one entry per stock and signal day, with the signal
+  close AND the close when it was added, prices moved on by any scan
+  (`on_bars`). The daily check runs it (`SIGNALS_DAILY`) and new entries ride
+  in the digest once, by the same pushed flag as alerts. Tests switch the
+  daily run off (`__signals_set_daily`) except in their own section.
 
 ## Screening
 

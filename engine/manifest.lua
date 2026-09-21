@@ -39,6 +39,7 @@ return {
     'engine/backtest.lua',   -- backtest_*  replay the engine's own signals
     'engine/groups.lua',     -- groups_*    region and board membership
     'engine/strategy.lua',   -- strategy_*  one rule across many stocks
+    'engine/signals.lua',    -- signals_*   the built-in rule's finds, kept and pushed
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry
