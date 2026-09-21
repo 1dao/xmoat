@@ -165,6 +165,8 @@ function g_exports.stock_refresh(code)
         pace()
         -- Eastmoney, whatever PRICE_SOURCE says: a watched stock's technical
         -- section wants the turnover rate, and only that source carries it.
+        -- When it refuses, quote_refresh retries on TDX — today's close
+        -- without chips, rather than judging today on last week's bars.
         local qdoc, _, qerr = quote_refresh(code, { source = 'em' })
         if not qdoc then cfg_log_warn('%s: price refresh failed: %s', code, tostring(qerr)) end
 

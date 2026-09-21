@@ -3,7 +3,7 @@
 -- Exports: tdx_frame, tdx_take_frame, tdx_price_at, tdx_volume, tdx_date,
 --          tdx_parse_bars, tdx_parse_xdxr, tdx_market_of, tdx_servers,
 --          tdx_acquire, tdx_release, tdx_with, tdx_bars, tdx_xdxr,
---          tdx_status, tdx_shutdown
+--          tdx_status, tdx_shutdown, __tdx_set_transport
 --
 -- WHY THIS EXISTS. Eastmoney serves one stock's daily history as half a
 -- megabyte of JSON over a fresh HTTPS connection, and starts dropping
@@ -132,10 +132,17 @@ end
 -- Daily bars, oldest first. Every price in the body is a difference: the open
 -- is a difference from the previous bar's running base, and the other three
 -- are differences from that open.
-function g_exports.tdx_parse_bars(body)
+--
+-- An INDEX answers the same request with four more bytes a row, the number of
+-- its members that rose and fell that day, and counts its volume in hundreds
+-- of 手 (checked against Eastmoney's: 2,042,300 here is its 204,230,027).
+-- `index` says which layout to read; reading one as the other misaligns every
+-- row after the first.
+function g_exports.tdx_parse_bars(body, index)
     if type(body) ~= 'string' or #body < 2 then return nil, 'empty response' end
     local count = string.unpack('<I2', body)
     local pos, rows, base = 3, {}, 0
+    local tail = index and 4 or 0
     for _ = 1, count do
         if pos + 3 > #body then return nil, 'truncated response' end
         local daynum = string.unpack('<I4', body, pos); pos = pos + 4
@@ -145,18 +152,19 @@ function g_exports.tdx_parse_bars(body)
         c, pos = tdx_price_at(body, pos)
         hi, pos = tdx_price_at(body, pos)
         lo, pos = tdx_price_at(body, pos)
-        if not (date and o and c and hi and lo) or pos + 7 > #body then
+        if not (date and o and c and hi and lo) or pos + 7 + tail > #body then
             return nil, 'truncated response'
         end
         local vol_raw = string.unpack('<I4', body, pos); pos = pos + 4
         local amt_raw = string.unpack('<I4', body, pos); pos = pos + 4
+        pos = pos + tail
         local open_abs = o + base
         rows[#rows + 1] = {
             date = date,
             open = open_abs / 1000, close = (open_abs + c) / 1000,
             high = (open_abs + hi) / 1000, low = (open_abs + lo) / 1000,
-            volume = tdx_volume(vol_raw),      -- 手
-            amount = tdx_volume(amt_raw),      -- yuan
+            volume = tdx_volume(vol_raw) * (index and 100 or 1),   -- 手
+            amount = tdx_volume(amt_raw),                          -- yuan
         }
         base = open_abs + c
     end
@@ -217,6 +225,14 @@ end
 local pool = {}            -- every session this process has opened
 local preferred = nil      -- the server that answered last, tried first
 local next_server = 0      -- round robin, so 32 connections are not 32 on one host
+local transport = nil      -- tests: stands in for the quote servers
+
+-- Tests replace the servers with fn(req) -> body | nil, err, where req is
+-- { msg = 'bars' | 'xdxr', market, code, start, count } and body is what
+-- the server would have sent, already inflated. nil restores the network.
+function g_exports.__tdx_set_transport(fn)
+    transport = fn
+end
 
 local function raw_call(s, pkg, want_msg, timeout_ms)
     local ok, err = s.conn:send_raw(pkg)
@@ -320,10 +336,21 @@ function g_exports.tdx_release(s)
     if s then s.busy = false end
 end
 
+-- One request on a session, or to the test transport when there is one.
+local function request(s, req, pkg, want_msg)
+    if transport then return transport(req) end
+    return raw_call(s, pkg, want_msg)
+end
+
 -- COROUTINE-ONLY. Run `fn(session)` on a pooled connection, releasing it
 -- however fn ends. A connection that failed mid-call is closed rather than
 -- returned to the pool: its buffer may hold half an answer.
 function g_exports.tdx_with(fn)
+    if transport then
+        local ok, a, b = pcall(fn, nil)
+        if not ok then return nil, tostring(a) end
+        return a, b
+    end
     local s, err = tdx_acquire()
     if not s then return nil, err end
     local ok, a, b = pcall(fn, s)
@@ -341,9 +368,14 @@ end
 
 -- COROUTINE-ONLY. `count` daily bars ending at the newest one, oldest first.
 -- TDX serves at most 800 per request, so more than that is several.
-function g_exports.tdx_bars(code, count)
+--
+-- opts = { market, index }: an index must say both. Its code does not name
+-- its market — 000001 is the Shanghai Composite in market 1 and 平安银行 in
+-- market 0 — and its rows are laid out differently (see tdx_parse_bars).
+function g_exports.tdx_bars(code, count, opts)
+    opts = opts or {}
     count = math.max(1, count or 800)
-    local market = tdx_market_of(code)
+    local market = opts.market or tdx_market_of(code)
     return tdx_with(function(s)
         local all = {}
         local start = 0
@@ -351,9 +383,11 @@ function g_exports.tdx_bars(code, count)
             local want = math.min(800, count - #all)
             local payload = string.pack('<I2c6I2I2I2I2I4I4I2',
                 market, code, 9, 1, start, want, 0, 0, 0)
-            local body, err = raw_call(s, tdx_frame(MSG_BARS, payload, MAGIC_BARS), MSG_BARS)
+            local body, err = request(s, { msg = 'bars', market = market, code = code,
+                                           start = start, count = want },
+                                      tdx_frame(MSG_BARS, payload, MAGIC_BARS), MSG_BARS)
             if not body then return nil, err end
-            local rows, perr = tdx_parse_bars(body)
+            local rows, perr = tdx_parse_bars(body, opts.index)
             if not rows then return nil, perr end
             if #rows == 0 then break end
             -- `start` counts back from the newest bar, so each page is older
@@ -374,7 +408,8 @@ function g_exports.tdx_xdxr(code)
         -- implementation sends them as a fixed prefix and so does this.
         local pkg = hexbytes('0c 1f 18 76 00 01 0b 00 0b 00 0f 00 01 00')
             .. string.pack('<Bc6', market, code)
-        local body, err = raw_call(s, pkg, MSG_XDXR)
+        local body, err = request(s, { msg = 'xdxr', market = market, code = code },
+                                  pkg, MSG_XDXR)
         if not body then return nil, err end
         return tdx_parse_xdxr(body)
     end)

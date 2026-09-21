@@ -8,9 +8,10 @@
 --
 -- WHAT IS MISSING, and it matters: a TDX daily bar carries no turnover rate.
 -- The chip distribution is built out of turnover, so a series fetched this way
--- has no chips. That is why a watched stock is still filled from Eastmoney,
+-- has no chips. That is why a watched stock is still asked of Eastmoney first,
 -- and this source is for the wide scans, where the open, high, low and close
--- are the whole question.
+-- are the whole question — and for the days Eastmoney refuses (engine/quote.lua
+-- falls back to it), when a close without chips beats no close at all.
 --
 -- THE ADJUSTMENT. TDX serves raw prices and the ex-rights records separately,
 -- so the forward adjustment happens here, with the formula every Chinese data
@@ -62,13 +63,26 @@ function g_exports.source_tdx_adjust(rows, events)
     return out
 end
 
+local MARKET = { SZ = 0, SH = 1, BJ = 2 }
+
 -- COROUTINE-ONLY. `count` daily bars, forward-adjusted, oldest first.
 -- Returns { code, rows } or nil plus a message.
-function g_exports.source_tdx_fetch_kline(sec, count)
+--
+-- opts.index: `sec` is an index. Its market comes from sec.market, since the
+-- code alone cannot say (000001), and there is nothing to adjust: an index
+-- has no dividends of its own, so the ex-rights request is not even sent.
+function g_exports.source_tdx_fetch_kline(sec, count, opts)
+    opts = opts or {}
     local code = type(sec) == 'table' and sec.code or tostring(sec)
-    local raw, err = tdx_bars(code, count or 800)
+    -- A stock's market follows from its code, as the ex-rights request below
+    -- also assumes; only an index needs telling.
+    local market = opts.index and type(sec) == 'table' and MARKET[sec.market] or nil
+    if opts.index and not market then return nil, 'index without a market: ' .. code end
+    local raw, err = tdx_bars(code, count or 800, { market = market, index = opts.index })
     if not raw then return nil, tostring(err) end
     if #raw == 0 then return { code = code, rows = {} } end
+    -- Still through the adjustment, for the daily change it computes.
+    if opts.index then return { code = code, rows = source_tdx_adjust(raw, {}) } end
 
     -- The ex-rights records are a second small request. Without them the
     -- prices are still prices — they are simply unadjusted — so a failure

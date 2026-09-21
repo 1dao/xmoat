@@ -216,6 +216,11 @@ local function build_technical(quotes)
     local t, why = tech_build(rows, { chips = { days = 500 } })
     if not t then return { note = why, as_of = quotes.last_date } end
     t.fetched_at = quotes.fetched_at
+    -- "Not enough turnover data" would read as a thin history; the reason is
+    -- the source, and saying so tells the reader it is not the stock's doing.
+    if not t.chips and quotes.source == 'tdx' then
+        t.chips_note = '这份行情来自通达信，不含换手率，所以没有筹码分布'
+    end
     return t
 end
 

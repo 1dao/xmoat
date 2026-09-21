@@ -151,9 +151,18 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   forward adjustment itself from the ex-rights records. Verified against
   Eastmoney's own 前复权: 0.0036% mean difference over 1,200 days.
 - TDX carries NO turnover rate, so no chip distribution. A watched stock is
-  therefore always filled from Eastmoney (`stock_refresh` asks for `em`), and
-  the cache records its `source`; asking for the other one refetches the whole
-  series rather than splicing two bases together.
+  therefore asked of Eastmoney (`stock_refresh` asks for `em`), and the cache
+  records its `source`; asking for the other one refetches the whole series
+  rather than splicing two bases together.
+- When Eastmoney's kline fetch fails, `quote_refresh` retries on TDX
+  (`FALLBACK`, one direction only) — its quote server blocks an address for
+  hours at a time, and a check judging today on last week's bars says nothing.
+  The next request asks Eastmoney again. Never TDX → Eastmoney: a scan that
+  lost TDX would become hundreds of Eastmoney requests in a row.
+- An index over TDX is the same request with 4 more bytes a row and volume in
+  hundreds of 手 (`tdx_parse_bars(body, true)`); its market comes from
+  `sec.market`, never the code (000001). Tests stand in for the servers with
+  `__tdx_set_transport`.
 - `quote_prefetch` fetches a whole universe in parallel over the pool —
   Eastmoney stays serial, because parallel HTTPS is what makes it refuse.
 - `engine/strategy.lua` is one rule across many stocks: `strategy_sweep` pools

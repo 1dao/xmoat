@@ -1142,6 +1142,24 @@ local function test_tdx()
     check('a truncated body is refused, not half-read',
         (tdx_parse_bars(raw:sub(1, 20))) == nil)
 
+    -- Eight bars of 沪深300 from the same servers, 2026-09-10 to 09-21. An
+    -- index row carries four more bytes than a stock's, and its volume is in
+    -- hundreds of 手; Eastmoney had 09-18 at 4507.39 on 189,924,166 手.
+    local iraw = assert(util_file_read('test/fixtures/tdx_bars_idx_000300.bin'), 'missing tdx fixture')
+    local irows = assert(tdx_parse_bars(iraw, true))
+    eq('every index bar is decoded', #irows, 8)
+    eq('from the oldest', irows[1].date, '2026-09-10')
+    eq('to the newest', irows[8].date, '2026-09-21')
+    near('which closed at the index level', irows[8].close, 4539.57, 0.001)
+    near('the day Eastmoney also has closes where it says', irows[7].close, 4507.39, 0.001)
+    check('the volume is in 手, as Eastmoney counts it',
+        math.abs(irows[7].volume - 189924166) / 189924166 < 1e-5, irows[7].volume)
+    check('the amount in yuan',
+        math.abs(irows[7].amount - 537699359226.9) / 537699359226.9 < 1e-5, irows[7].amount)
+    local misread = tdx_parse_bars(iraw)
+    check('read with the stock layout, the rows after the first come out wrong',
+        not misread or #misread ~= 8 or misread[2].date ~= '2026-09-11', misread and #misread)
+
     eq('Shanghai is market 1', tdx_market_of('600519'), 1)
     eq('the STAR market too', tdx_market_of('688981'), 1)
     eq('Shenzhen is 0', tdx_market_of('000001'), 0)
@@ -1237,6 +1255,85 @@ local function test_quote()
         api_call('quote.refresh', { code = '000002' }).error.code, 'not_found')
     eq('and an offline read of a stock never fetched says so',
         api_call('quote.get', { code = '000002', offline = true }).error.code, 'not_fetched')
+
+    -- The day Eastmoney's quote server blocks the address: every kline request
+    -- is cut off, everything else still answers. TDX takes over.
+    local kline_refused = function(url, opts)
+        if url:find('/qt/stock/kline/get', 1, true) then
+            return nil, 'connection closed before full response (eof)'
+        end
+        return fixture_transport(url, opts)
+    end
+    local asked = {}
+    local tdx_up = function(req)
+        asked[#asked + 1] = req
+        if req.msg == 'xdxr' then return '' end
+        if req.code == '600519' and req.market == 1 then
+            return util_file_read('test/fixtures/tdx_bars_600519.bin')
+        end
+        if req.code == '000300' and req.market == 1 then
+            return util_file_read('test/fixtures/tdx_bars_idx_000300.bin')
+        end
+        return nil, 'no fixture for ' .. tostring(req.market) .. '.' .. tostring(req.code)
+    end
+    __net_set_transport(kline_refused)
+    __tdx_set_transport(tdx_up)
+    local fb = api_call('quote.refresh', { code = '600519' })
+    check('a refused Eastmoney fetch is answered from TDX', fb.ok, fb.error and fb.error.message)
+    eq('and the cache says who filled it', fb.ok and fb.data.source, 'tdx')
+    eq('with the days TDX has', fb.ok and fb.data.last_date, '2026-09-18')
+    eq('replacing the Eastmoney series rather than splicing onto it', fb.ok and fb.data.days, 8)
+
+    asked = {}
+    local ifb = api_call('quote.refresh', { code = 'idx:000300' })
+    check('an index falls back too', ifb.ok, ifb.error and ifb.error.message)
+    eq('asked of Shanghai, which its code alone would not say', asked[1] and asked[1].market, 1)
+    eq('with no ex-rights request, since an index has nothing to adjust', #asked, 1)
+    eq('and its bars read in the index layout', ifb.ok and ifb.data.last_date, '2026-09-21')
+
+    asked = {}
+    local stay, scode = quote_refresh('600519', { fallback = false })
+    check('fallback = false stays with the source asked for', stay == nil and scode == 'upstream')
+    eq('and never asks the other', #asked, 0)
+
+    __tdx_set_transport(function() return nil, 'no server would talk' end)
+    local both = api_call('quote.refresh', { code = '600519' })
+    eq('when both refuse it is an upstream failure', both.error and both.error.code, 'upstream')
+    check('that names both sources', both.error and both.error.message:find('东方财富', 1, true)
+        and both.error.message:find('通达信', 1, true), both.error and both.error.message)
+    eq('and the TDX copy is kept as it was', quote_status('600519').last_date, '2026-09-18')
+
+    -- Eastmoney answers again: the next request asks it first, as ever, and
+    -- the whole series comes back from it.
+    __tdx_set_transport(tdx_up)
+    __net_set_transport(fixture_transport)
+    local back = api_call('quote.refresh', { code = '600519' })
+    eq('once Eastmoney answers, the series is its again', back.ok and back.data.source, 'em')
+    eq('whole, not spliced onto the TDX days', back.ok and back.data.days, 11)
+    local iback = api_call('quote.refresh', { code = 'idx:000300' })
+    eq('the index as well', iback.ok and iback.data.source, 'em')
+
+    -- The scheduled check's path, from an Eastmoney cache: a watched stock's
+    -- refresh with the kline server refusing still ends with today's bars.
+    __net_set_transport(kline_refused)
+    local sr = api_call('stock.refresh', { code = '600519' })
+    check('a stock refresh goes on when the kline server refuses', sr.ok, sr.error and sr.error.message)
+    eq('with its bars from TDX', quote_status('600519').source, 'tdx')
+    eq('up to the day TDX has', quote_status('600519').last_date, '2026-09-18')
+    __net_set_transport(fixture_transport)
+    api_call('quote.refresh', { code = '600519' })       -- as the later sections expect
+    __tdx_set_transport(nil)
+
+    -- A series without turnover says why it has no chips, instead of calling
+    -- the history thin.
+    local bars = {}
+    for i = 1, 120 do bars[i] = { date = util_date_add_days('2026-01-01', i), close = 10 + i * 0.01,
+                                  high = 10.1 + i * 0.01, low = 9.9 + i * 0.01, volume = 1000 } end
+    local a = analysis_build({ reports = {}, valuation = {} }, nil,
+        { quotes = { source = 'tdx', rows = bars, last_date = bars[120].date } })
+    check('a TDX series names its source as the reason for no chips',
+        a.technical and a.technical.chips_note and a.technical.chips_note:find('通达信', 1, true),
+        a.technical and a.technical.chips_note)
     __net_set_transport(nil)
 end
 

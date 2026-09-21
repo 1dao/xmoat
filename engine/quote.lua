@@ -30,11 +30,23 @@
 --   tdx  the 通达信 protocol (engine/tdx.lua): 14 KB of binary per stock over
 --        a connection that stays open, adjusted by us from the ex-rights
 --        records, no turnover rate.
--- A watched stock is therefore always filled from Eastmoney, and a wide scan
--- from TDX. Asking for a source the cache was not filled with refetches the
--- whole series rather than splicing two of them together.
+-- A watched stock is therefore asked of Eastmoney, and a wide scan of TDX.
+-- Asking for a source the cache was not filled with refetches the whole series
+-- rather than splicing two of them together.
+--
+-- WHEN EASTMONEY REFUSES, TDX. Its quote server blocks an address outright
+-- for a while — every request cut off in 160 ms, whatever the host or scheme —
+-- and a check that runs on such a day would otherwise judge today against
+-- last week's bars and say nothing. So an Eastmoney failure is retried on TDX
+-- and the cache records that TDX filled it. The price is paid in turnover:
+-- no chip distribution until Eastmoney answers again, and then one whole
+-- refetch from it, because the next request asks for Eastmoney as before.
+-- Not the other way round: a scan that loses TDX would turn into hundreds of
+-- Eastmoney requests in a row, which is exactly what gets an address blocked.
 
 local OVERLAP_DAYS = 10          -- calendar days re-fetched to catch adjustment
+local FALLBACK = { em = 'tdx' }  -- which source a failed fetch is retried on
+local LABEL = { em = '东方财富', tdx = '通达信' }
 local DRIFT = 0.002              -- 0.2%: rounding differs, an adjustment does not
 
 local inflight = {}              -- store key -> true while a fetch runs
@@ -119,8 +131,9 @@ end
 -- opts = { full = true } forces the whole history rather than an extension,
 -- opts.source ('em' or 'tdx') picks which source to ask (the default is
 -- PRICE_SOURCE; a cache filled by the other one is replaced, not extended),
--- and opts.max_days overrides QUOTE_MAX_DAYS — a scan of the whole market
--- keeps a few hundred days per stock rather than five years of them.
+-- opts.max_days overrides QUOTE_MAX_DAYS — a scan of the whole market
+-- keeps a few hundred days per stock rather than five years of them — and
+-- opts.fallback = false stays with the source asked for even when it fails.
 function g_exports.quote_refresh(code, opts)
     opts = opts or {}
     local t, terr = quote_resolve(code)
@@ -137,32 +150,52 @@ function g_exports.quote_refresh(code, opts)
         local old, lerr = store_load(t.key)
         if lerr then cfg_log_warn('%s: cached prices unreadable, refetching all: %s', t.key, lerr) end
         local source = opts.source or cfg_get('PRICE_SOURCE', 'em')
-        -- An index is Eastmoney's: TDX serves indices under its own codes and
-        -- the review only needs the four, so there is nothing to gain.
+        -- An index is asked of Eastmoney: the review only needs the four, and
+        -- its series carries the index's name. TDX is the fallback.
         if t.kind == 'index' then source = 'em' end
-        local same_source = old and (old.source or 'em') == source
-        local rows = (not opts.full) and same_source and old and type(old.rows) == 'table'
-            and old.rows or {}
-        if old and not same_source then
-            cfg_log_info('%s: source changed to %s, refetching the whole series', t.key, source)
-        end
-        local last = rows[#rows] and rows[#rows].date
 
-        local res, err
-        if source == 'tdx' then
-            -- TDX serves N bars back from the newest, so an extension asks for
-            -- the gap plus a little: there is no "since this date" form.
-            local want = opts.max_days or cfg_int('QUOTE_MAX_DAYS', 1200)
-            if last then
-                local gap = util_date_diff_days(last, util_today()) or 0
-                want = math.min(want, math.max(20, math.floor(gap * 0.75) + OVERLAP_DAYS))
+        -- What a source may extend: the cached rows if it filled them.
+        local function held(src)
+            if opts.full or not old or (old.source or 'em') ~= src
+                or type(old.rows) ~= 'table' then return {} end
+            return old.rows
+        end
+        local function fetch(src, rows)
+            local last = rows[#rows] and rows[#rows].date
+            if src == 'tdx' then
+                -- TDX serves N bars back from the newest, so an extension asks
+                -- for the gap plus a little: there is no "since this date" form.
+                local want = opts.max_days or cfg_int('QUOTE_MAX_DAYS', 1200)
+                if last then
+                    local gap = util_date_diff_days(last, util_today()) or 0
+                    want = math.min(want, math.max(20, math.floor(gap * 0.75) + OVERLAP_DAYS))
+                end
+                return source_tdx_fetch_kline(t.sec, want, { index = t.kind == 'index' })
             end
-            res, err = source_tdx_fetch_kline(t.sec, want)
-        else
             local from = last and util_date_add_days(last, -OVERLAP_DAYS) or nil
-            res, err = source_em_fetch_kline(t.sec, from)
+            return source_em_fetch_kline(t.sec, from)
+        end
+
+        local rows = held(source)
+        local res, err = fetch(source, rows)
+        local other = opts.fallback ~= false and FALLBACK[source]
+        if not res and other then
+            cfg_log_warn('%s: %s refused (%s), trying %s', t.key, source, tostring(err), other)
+            local rows2 = held(other)
+            local res2, err2 = fetch(other, rows2)
+            -- An empty answer from the fallback is not "this stock has no
+            -- prices": the source that would know has just failed.
+            if res2 and (#res2.rows > 0 or #rows2 > 0) then
+                source, rows, res = other, rows2, res2
+            else
+                err = string.format('%s %s；%s %s', LABEL[source], tostring(err), LABEL[other],
+                    res2 and '没有数据' or tostring(err2))
+            end
         end
         if not res then return nil, 'upstream', '行情获取失败：' .. tostring(err) end
+        if old and (old.source or 'em') ~= source then
+            cfg_log_info('%s: source changed to %s, refetching the whole series', t.key, source)
+        end
         if #res.rows == 0 and #rows == 0 then
             return nil, 'not_found', tostring(code) .. ' 没有行情数据'
         end
@@ -171,12 +204,7 @@ function g_exports.quote_refresh(code, opts)
         if drifted then
             -- Forward adjustment changed: everything held is on the old basis.
             cfg_log_info('%s: adjustment changed, refetching the whole series', t.key)
-            local all, aerr
-            if source == 'tdx' then
-                all, aerr = source_tdx_fetch_kline(t.sec, cfg_int('QUOTE_MAX_DAYS', 1200))
-            else
-                all, aerr = source_em_fetch_kline(t.sec, nil)
-            end
+            local all, aerr = fetch(source, {})
             if not all then return nil, 'upstream', '重新抓取全部行情失败：' .. tostring(aerr) end
             merged = all.rows
             res.name = all.name or res.name
