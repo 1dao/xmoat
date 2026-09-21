@@ -147,7 +147,7 @@
     const m = location.hash.match(/^#\/stock\/([0-9A-Za-z.]+)$/);
     const page = m ? 'stock'
       : location.hash === '#/alerts' ? 'alerts'
-      : location.hash === '#/screen' ? 'screen'
+      : location.hash === '#/screen' || location.hash === '#/screen/rules' ? 'screen'
       : location.hash === '#/review' ? 'review'
       : 'watchlist';
     for (const link of document.querySelectorAll('[data-nav]')) {
@@ -156,7 +156,7 @@
     }
     if (m) return renderStock(m[1], token);
     if (page === 'alerts') return renderAlerts(token);
-    if (page === 'screen') return renderScreen(token);
+    if (page === 'screen') return renderScreen(token, location.hash === '#/screen/rules' ? 'rules' : 'custom');
     if (page === 'review') return renderReview(token);
     return renderWatchlist(token);
   }
@@ -960,12 +960,28 @@
     return q;
   }
 
-  async function renderScreen(token) {
-    document.title = '筛选 · xmoat';
+  // Two ways to narrow the market: conditions on the snapshot the user sets
+  // (定制规则), and the rules the engine ships with their fitted numbers
+  // (内置规则). Each has its own address, so a reload stays on the same one.
+  function screenTabs(tab) {
+    const group = h('div', { class: 'seg screen-tabs', role: 'group', 'aria-label': '筛选方式' });
+    for (const [value, label, hash] of [['custom', '定制规则', '#/screen'], ['rules', '内置规则', '#/screen/rules']]) {
+      group.append(h('button', { type: 'button', text: label, 'aria-pressed': String(tab === value),
+        onclick: () => { if (location.hash !== hash) location.hash = hash; } }));
+    }
+    return group;
+  }
+
+  async function renderScreen(token, tab) {
+    document.title = (tab === 'rules' ? '内置规则' : '筛选') + ' · xmoat';
     setView(loading());
-    let status;
-    try { status = await api('GET', '/api/v1/market'); }
-    catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
+    let status, rules;
+    try {
+      [status, rules] = await Promise.all([
+        api('GET', '/api/v1/market'),
+        tab === 'rules' ? api('GET', '/api/v1/strategy/rules') : null,
+      ]);
+    } catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
     if (stale(token)) return;
 
     const saved = (() => {
@@ -988,9 +1004,14 @@
       h('span', { class: 'spacer' }), refresh);
 
     if (!status.ready) {
-      setView(head, h('div', { class: 'card empty' },
+      setView(head, screenTabs(tab), h('div', { class: 'card empty' },
         h('p', { text: status.hint || '还没有全市场快照。' }),
         h('p', { class: 'muted', text: '快照包含当日估值和最近一个年报的业绩，抓一次约十几秒。' })));
+      return;
+    }
+
+    if (tab === 'rules') {
+      setView(head, screenTabs(tab), rules.flatMap(rule => ruleCard(rule, token)));
       return;
     }
 
@@ -1071,12 +1092,11 @@
       storage(s => s.removeItem(SCREEN_KEY));
     });
 
-    setView(head, h('section', { class: 'card' }, form), results);
+    setView(head, screenTabs(tab), h('section', { class: 'card' }, form), results);
     if (Object.keys(saved).length) submit();
   }
 
-  function screenRow(r) {
-    const open = () => { location.hash = '#/stock/' + r.code; };
+  function watchButton(r) {
     const add = h('button', { class: 'btn btn-small btn-quiet', text: '加入自选' });
     add.addEventListener('click', async e => {
       e.stopPropagation();
@@ -1089,6 +1109,144 @@
       });
       if (added) { add.textContent = '已加入'; add.disabled = true; }
     });
+    return add;
+  }
+
+  // ── built-in rules: one rule over the whole market ──────────────────────────
+
+  // Each rule's last numbers, for this browser only.
+  const RULES_KEY = 'xmoat.rules';
+  // Each rule's last result, for coming back to the tab without another scan.
+  const lastScan = {};
+
+  // A count said in weeks may be 8 or 8.4; either reads as written.
+  const fmtCount = v => (isNum(v) ? fmtNum(v, Number.isInteger(v) ? 0 : 1) : '—');
+
+  function ruleCard(rule, token) {
+    const savedAll = (() => {
+      try { return JSON.parse(storage(s => s.getItem(RULES_KEY)) || '{}'); } catch (e) { return {}; }
+    })();
+    const saved = savedAll[rule.id] || {};
+
+    const form = h('form', { class: 'screen-form' });
+    for (const f of rule.fields) {
+      form.append(h('label', { class: 'field' },
+        h('span', { text: `${f.label}（${f.unit}）` }),
+        h('input', { type: 'number', step: 'any', name: f.name, min: f.min, max: f.max,
+          required: true, value: saved[f.name] ?? f.default })));
+    }
+    const run = h('button', { class: 'btn btn-primary', type: 'submit', text: '筛选全市场' });
+    const reset = h('button', { class: 'btn btn-quiet', type: 'button', text: '恢复默认' });
+    form.append(h('div', { class: 'field field-actions' }, run, reset,
+      h('span', { class: 'muted small', text:
+        '第一次会用通达信把全市场的日线抓到本地，要一两分钟；之后只补新的几天，十几秒。' })));
+
+    const results = h('section', { class: 'card' });
+    const kept = lastScan[rule.id];
+    if (kept) showScan(results, kept.res, kept.at);
+    else results.append(h('p', { class: 'muted', text: '点“筛选全市场”，在全部 A 股（不含 ST）里找现在正在发这个信号的股票。' }));
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const q = {};
+      for (const f of rule.fields) {
+        const v = form.elements[f.name].value;
+        if (v !== '') q[f.name] = v;
+      }
+      savedAll[rule.id] = q;
+      storage(s => s.setItem(RULES_KEY, JSON.stringify(savedAll)));
+      await busy(run, '全市场扫描中…', async () => {
+        const res = await api('GET', '/api/v1/strategy/scan?' +
+          new URLSearchParams({ rule: rule.id, universe: 'market', limit: '6000', ...q }).toString());
+        lastScan[rule.id] = { res, at: new Date().toISOString() };
+        if (stale(token)) return;
+        showScan(results, res, lastScan[rule.id].at);
+      });
+    });
+    reset.addEventListener('click', () => {
+      for (const f of rule.fields) form.elements[f.name].value = f.default;
+      delete savedAll[rule.id];
+      storage(s => s.setItem(RULES_KEY, JSON.stringify(savedAll)));
+    });
+
+    return [
+      h('section', { class: 'card' },
+        h('div', { class: 'card-head' }, h('h2', { text: rule.title })),
+        h('p', { text: rule.summary }),
+        form,
+        h('p', { class: 'muted small mt', text: rule.basis })),
+      results,
+    ];
+  }
+
+  // The rows beyond this are there, and counted; a table of a thousand rows
+  // is not something anyone reads.
+  const SCAN_ROWS = 300;
+
+  function showScan(box, res, at) {
+    box.textContent = '';
+    const p = res.params || {};
+    const f = res.fetch || {};
+    box.append(h('div', { class: 'card-head' },
+      h('h2', { text: `${res.hits.length} 只在发信号` }),
+      h('span', { class: 'muted', text:
+        `看了 ${res.checked} 只 · ${fmtCount(p.ma_weeks)} 周均线 + ${fmtPct(p.above_pct)}` +
+        ` · 前 ${fmtCount(p.flat_weeks)} 周走平（±${fmtPct(p.flat_max)}）` +
+        (res.days > 1 ? ` · 最近 ${res.days} 个交易日` : ' · 当日') }),
+      h('span', { class: 'spacer' }),
+      h('span', { class: 'muted small', text: '扫描于 ' + fmtTime(at) })));
+    if (!res.hits.length) {
+      box.append(h('p', { class: 'muted', text:
+        '现在没有股票在发这个信号。可以把“信号出现在最近”放宽到 3–5 个交易日再看。' }));
+    } else {
+      box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
+        h('thead', {}, h('tr', {},
+          h('th', { text: '股票' }), h('th', { text: '信号日' }),
+          h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '均线' }),
+          h('th', { class: 'r', text: '高出' }), h('th', { class: 'r', text: '均线变动' }),
+          h('th', { class: 'r', text: '当日涨幅' }), h('th', { class: 'r', text: '市值' }),
+          h('th', { class: 'r', text: 'PE(TTM)' }), h('th', { class: 'r', text: 'ROE' }),
+          h('th', { text: '' }))),
+        h('tbody', {}, res.hits.slice(0, SCAN_ROWS).map(scanRow)))));
+      if (res.hits.length > SCAN_ROWS) {
+        box.append(h('p', { class: 'muted small', text:
+          `只列出前 ${SCAN_ROWS} 只（最新的信号、高出均线最多的在前）。` }));
+      }
+    }
+    const lines = [];
+    if (isNum(f.total)) {
+      lines.push(`行情：本地 ${f.cached} 只，新抓 ${f.fetched} 只` +
+        (f.failed && f.failed.length ? `，失败 ${f.failed.length} 只` : '') +
+        (isNum(f.ms) ? `，用时 ${fmtNum(f.ms / 1000, 1)} 秒` : '') + '。');
+    }
+    if (res.skipped && res.skipped.length) {
+      lines.push(`跳过 ${res.skipped.length} 只：日线不够长（多是新股）或没有行情。`);
+    }
+    if (res.note) lines.push(res.note);
+    for (const line of lines) box.append(h('p', { class: 'muted small', text: line }));
+  }
+
+  function scanRow(r) {
+    const open = () => { location.hash = '#/stock/' + r.code; };
+    return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
+      h('td', { class: 'col-name' }, h('span', { class: 'name', text: r.name || r.code }), ' ',
+        h('span', { class: 'code', text: r.code }),
+        h('span', { class: 'sub', text: r.industry || '' })),
+      h('td', { 'data-label': '信号日', text: r.date + (r.bars_ago > 0 ? `（${r.bars_ago} 天前）` : '') }),
+      h('td', { class: 'r num', 'data-label': '收盘', text: fmtNum(r.close) }),
+      h('td', { class: 'r num', 'data-label': '均线', text: fmtNum(r.ma) }),
+      h('td', { class: 'r num', 'data-label': '高出', text: fmtPct(r.above) }),
+      h('td', { class: 'r num', 'data-label': '均线变动', text: fmtPct(r.slope) }),
+      h('td', { class: 'r num', 'data-label': '当日涨幅', text: fmtPct(r.day_gain) }),
+      h('td', { class: 'r num', 'data-label': '市值', text: fmtMoney(r.market_cap) }),
+      h('td', { class: 'r num', 'data-label': 'PE(TTM)', text: fmtNum(r.pe_ttm, 1) }),
+      h('td', { class: 'r num', 'data-label': 'ROE', text: fmtPct(r.roe) }),
+      h('td', { class: 'r col-actions' }, watchButton(r)));
+  }
+
+  function screenRow(r) {
+    const open = () => { location.hash = '#/stock/' + r.code; };
+    const add = watchButton(r);
     const pct = v => (isNum(v) ? fmtPct(v) : '—');
     return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
       h('td', {}, h('span', { class: 'name', text: r.name || r.code }), ' ',

@@ -1817,6 +1817,58 @@ local function test_market()
     eq('a screen is the same list with conditions', #strategy_universe({
         universe = 'screen', filters = { roe_min = 20 }, limit = 6000 }), 1)
     eq('the limit still applies', #strategy_universe({ universe = 'market', limit = 1 }), 1)
+
+    -- The built-in rules a client offers, with the configured numbers.
+    local rules = api_call('strategy.rules')
+    check('the built-in rules are listed', rules.ok and #rules.data >= 1, rules.error and rules.error.message)
+    local rule = rules.ok and rules.data[1] or {}
+    eq('the first is the weekly-base breakout', rule.id, 'breakout')
+    local def = {}
+    for _, f in ipairs(rule.fields or {}) do def[f.name] = f.default end
+    eq('its average is said in weeks: the configured 40 days are 8', def.ma_weeks, 8)
+    eq('its threshold is the configured 3%', def.above_pct, 3)
+    eq('and its base is five weeks flat', def.flat_weeks, 5)
+
+    -- 甲公司 flat at 100 for two hundred days, and 4% above that today.
+    local today, bars = util_today(), {}
+    for i = 1, 201 do
+        local close = i < 201 and 100 or 104
+        bars[i] = { date = util_date_add_days(today, i - 201), open = close, close = close,
+                    high = close, low = close, change_pct = i < 201 and 0 or 4 }
+    end
+    store_save('quote:600001', { version = 1, code = '600001', kind = 'stock', adjust = 'qfq',
+        source = 'em', fetched_at = util_now_iso(), first_date = bars[1].date, last_date = today,
+        rows = util_json_array(bars) })
+
+    -- A scan over the market must not trade a watched stock's Eastmoney series
+    -- (turnover, chips) for TDX's just because it asks TDX.
+    check('a series taken just now is fresh', not quote_is_stale(quote_load('600001')))
+    local tdx_asked = 0
+    __tdx_set_transport(function() tdx_asked = tdx_asked + 1; return nil, 'not expected' end)
+    local pf = quote_prefetch({ '600001' }, { source = 'tdx' })
+    eq('a fresh Eastmoney series counts as cached for a TDX scan', pf.cached, 1)
+    eq('so TDX is not asked', tdx_asked, 0)
+    eq('and the series keeps its source', quote_status('600001').source, 'em')
+    __tdx_set_transport(nil)
+
+    local scan = api_call('strategy.scan', { rule = 'breakout', universe = 'market', limit = 6000,
+                                             ma_weeks = 8, flat_weeks = 5, above_pct = 3, offline = true })
+    check('the rule scans the whole market', scan.ok, scan.error and scan.error.message)
+    local sp = scan.ok and scan.data.params or {}
+    eq('weeks become trading days', sp.ma_days, 40)
+    eq('both windows', sp.flat_lookback, 25)
+    eq('and go back in weeks for the reader', sp.ma_weeks, 8)
+    local hit = scan.ok and scan.data.hits[1]
+    eq('the stock that broke out today is found', scan.ok and #scan.data.hits == 1 and hit.code, '600001')
+    check('with the snapshot figures beside it', hit and hit.name == '甲公司' and hit.pe_ttm == 12)
+    eq('the one with no bars is skipped, not guessed', scan.ok and #scan.data.skipped, 1)
+    eq('at 5% the same day is no signal', #api_call('strategy.scan', { universe = 'market',
+        limit = 6000, ma_weeks = 8, above_pct = 5, offline = true }).data.hits, 0)
+    eq('a window given in days and in weeks is refused', api_call('strategy.scan',
+        { universe = 'market', ma_days = 40, ma_weeks = 8, offline = true }).error.code, 'bad_request')
+    eq('an unknown rule is refused', api_call('strategy.scan',
+        { rule = 'nope', universe = 'market', offline = true }).error.code, 'bad_request')
+    util_file_remove(store_dir() .. '/quotes/600001.json')
 end
 
 -- ── Phase 5: the insurance and broker templates ─────────────────────────────

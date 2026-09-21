@@ -645,10 +645,13 @@ local function strategy_params(with_grid)
         p.max_worst = { type = 'number', doc = '最差一笔的下限 %，如 -15' }
         p.max_sl = { type = 'integer', doc = '先到止损的次数上限' }
     else
-        p.ma_days = { type = 'integer', doc = '均线窗口，默认 50（约 10 周）' }
-        p.above_pct = { type = 'number', doc = '高出均线的幅度 %，默认 6' }
-        p.flat_max = { type = 'number', doc = '走平容忍度 %，默认 2' }
+        p.ma_days = { type = 'integer', doc = '均线窗口（交易日），默认 BREAKOUT_MA_DAYS（40，8 周）' }
+        p.ma_weeks = { type = 'number', doc = '均线窗口按周说，一周 5 个交易日；和 ma_days 只给一个' }
+        p.flat_weeks = { type = 'number', doc = '走平按周判断；和 flat_lookback 只给一个' }
+        p.above_pct = { type = 'number', doc = '高出均线的幅度 %，默认 BREAKOUT_ABOVE_PCT（3）' }
+        p.flat_max = { type = 'number', doc = '走平容忍度 %，默认 BREAKOUT_FLAT_MAX（1）' }
         p.days = { type = 'integer', doc = '最近几个交易日内出现的信号都算，默认 1' }
+        p.rule = { type = 'string', enum = { 'breakout' }, doc = '内置规则，见 strategy.rules；默认 breakout' }
     end
     return p
 end
@@ -805,13 +808,38 @@ local function install_strategy()
             if p.days and (p.days < 1 or p.days > 20) then
                 return nil, 'bad_request', 'days 应在 1 到 20 之间'
             end
+            if p.ma_weeks and p.ma_days then
+                return nil, 'bad_request', 'ma_days 和 ma_weeks 只给一个'
+            end
+            if p.flat_weeks and p.flat_lookback then
+                return nil, 'bad_request', 'flat_lookback 和 flat_weeks 只给一个'
+            end
+            if p.ma_weeks and (p.ma_weeks < 1 or p.ma_weeks > 100) then
+                return nil, 'bad_request', 'ma_weeks 应在 1 到 100 之间'
+            end
+            if p.flat_weeks and (p.flat_weeks < 1 or p.flat_weeks > 52) then
+                return nil, 'bad_request', 'flat_weeks 应在 1 到 52 之间'
+            end
+            if p.above_pct and (p.above_pct < 0 or p.above_pct > 50) then
+                return nil, 'bad_request', 'above_pct 应在 0 到 50 之间'
+            end
+            if p.flat_max and (p.flat_max < 0 or p.flat_max > 20) then
+                return nil, 'bad_request', 'flat_max 应在 0 到 20 之间'
+            end
             local opts = strategy_common(p)
             opts.ma_days, opts.above_pct, opts.flat_max = p.ma_days, p.above_pct, p.flat_max
+            opts.ma_weeks, opts.flat_weeks = p.ma_weeks, p.flat_weeks
             opts.days = p.days
             local res, ecode, emsg = strategy_scan(opts)
             if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
             return res
         end,
+    })
+
+    api_define({
+        name = 'strategy.rules', method = 'GET', path = '/api/v1/strategy/rules',
+        summary = '内置的选股规则，以及它们的参数和当前默认值（来自配置）',
+        handler = function() return strategy_rules() end,
     })
 end
 

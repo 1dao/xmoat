@@ -70,7 +70,8 @@
 | `strategy.sweep` | `GET /api/v1/strategy/sweep` | 同上，外加 `codes?` / `universe?` / `limit?` 与筛选条件 | `Sweep`：一组股票合在一起拟合 |
 | `strategy.attribute` | `GET /api/v1/strategy/attribute` | 同 scan，外加 `horizon?`，`min_signals?`，`group?` | 按行业/板块/地域分组，每组与自己的基准比 |
 | `groups.regions` | `GET /api/v1/groups/regions` | `refresh?`，`offline?` | 地域归属（31 个地域板块，约 5500 只），缓存 30 天 |
-| `strategy.scan` | `GET /api/v1/strategy/scan` | `ma_days?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
+| `strategy.scan` | `GET /api/v1/strategy/scan` | `rule?`，`ma_days?` 或 `ma_weeks?`，`flat_lookback?` 或 `flat_weeks?`，`above_pct?`，`flat_max?`，`days?`，`codes?` / `universe?` / `limit?` | `Scan`：现在正在发信号的股票 |
+| `strategy.rules` | `GET /api/v1/strategy/rules` | — | `Rule[]`：内置规则及其参数，默认值来自配置 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
@@ -396,10 +397,22 @@ type MarketList = {
           st?: true, close?: number, market_cap?: number }[],
 }
 
+type Rule = {
+  id: 'breakout',                           // strategy.scan 的 rule
+  title: string, summary: string,
+  basis: string,                            // 默认值是怎么来的（网格结论）
+  fields: {                                 // 原样作为 strategy.scan 的参数
+    name: string, label: string, unit: string,
+    default: number,                        // 当前配置；按周说的窗口可能是 8.4 这样的小数
+    min: number, max: number, step: number,
+  }[],
+}
+
 type Scan = {
   universe: string, checked: number, days: number,
   params: { ma_days: number, above_pct: number, flat_max: number,
-            flat_lookback: number, min_day_gain: number },
+            flat_lookback: number, min_day_gain: number,
+            ma_weeks: number, flat_weeks: number },   // 同两个窗口，按周（一周 5 个交易日）
   hits: {
     code: string, name?: string, industry?: string,
     date: string, close: number, ma: number,
@@ -409,10 +422,13 @@ type Scan = {
     pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
   }[],                                      // 每只股票只留最近的一次
   skipped: { code: string, reason: string }[],
-  fetch?: { total: number, cached: number, fetched: number, failed: {code, error}[] },
+  fetch?: { total: number, cached: number, fetched: number, ms?: number, failed: {code, error}[] },
   note: string,
 }
 ```
+
+`fetch` 里，已经够新的缓存不论是哪个来源填的都算「本地」：扫描用通达信，
+也不会把自选股那份带换手率的东方财富日线换掉。
 
 ### Review
 

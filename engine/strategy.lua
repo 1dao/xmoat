@@ -2,7 +2,7 @@
 -- numbers on a pooled history, and scanning for the ones firing now.
 --
 -- Exports: strategy_universe, strategy_collect, strategy_pool,
---          strategy_sweep, strategy_scan, strategy_attribute
+--          strategy_sweep, strategy_scan, strategy_attribute, strategy_rules
 --
 -- WHY THIS EXISTS SEPARATELY FROM backtest.lua. That file answers "what would
 -- this rule have done to this stock". Useful, and not enough to choose the
@@ -295,20 +295,74 @@ function g_exports.strategy_sweep(opts)
     }
 end
 
+-- A length in trading days, said in weeks: 40 is 8, 42 is 8.4.
+local function weeks(days)
+    local wk = backtest_week_days
+    if days % wk == 0 then return days // wk end
+    return days / wk
+end
+
+-- The rules a client can offer ready-made, with their numbers as configured.
+-- A client lists these instead of knowing them: the defaults are the grid's
+-- answer and live in xmoat.cfg, and a phone app should not carry its own copy.
+-- The fields are in weeks where the rule is said in weeks ("8 周均线");
+-- strategy.scan takes them as they are and turns them into trading days.
+function g_exports.strategy_rules()
+    local d = backtest_breakout_params()
+    return util_json_array({
+        {
+            id = 'breakout',
+            title = '突破横盘周线',
+            summary = '均线走平一段时间之后，收盘价站上均线一定幅度：股价从一个平台里走了出来。',
+            -- What the grid measured, which stays true whatever the config
+            -- now says; the fields below carry the current values.
+            basis = '网格拟合（5254 只股票、五年）：8 周均线 + 3%、前 5 周走平（容忍 1%），' ..
+                    '60 日中位收益比同期随便哪天买高 2.6 个百分点，胜率高 7 个点；' ..
+                    '要求横盘满 10 周效果相近，但信号少一半。',
+            fields = util_json_array({
+                { name = 'ma_weeks', label = '均线', unit = '周', default = weeks(d.ma_days),
+                  min = 1, max = 100, step = 1 },
+                { name = 'above_pct', label = '收盘高出均线', unit = '%', default = d.above_pct,
+                  min = 0, max = 50, step = 0.5 },
+                { name = 'flat_weeks', label = '横盘：均线走平', unit = '周',
+                  default = weeks(d.flat_lookback), min = 1, max = 52, step = 1 },
+                { name = 'flat_max', label = '走平容忍', unit = '%', default = d.flat_max,
+                  min = 0, max = 20, step = 0.5 },
+                { name = 'min_day_gain', label = '当天至少涨', unit = '%', default = d.min_day_gain,
+                  min = 0, max = 20, step = 0.5 },
+                { name = 'days', label = '信号出现在最近', unit = '个交易日内', default = 1,
+                  min = 1, max = 20, step = 1 },
+            }),
+        },
+    })
+end
+
 -- COROUTINE-ONLY. Which stocks are firing the rule right now.
 --
 -- opts adds { days = 1 }: how many of the most recent bars count as "now", so
--- a signal from two days ago is still findable on a Wednesday morning.
+-- a signal from two days ago is still findable on a Wednesday morning — and
+-- { ma_weeks, flat_weeks }, the same two windows said in weeks.
 function g_exports.strategy_scan(opts)
     opts = util_copy(opts)
     local days = math.max(1, math.min(opts.days or 1, 20))
     local d = backtest_breakout_params()
+    local wk = backtest_week_days
+    if not opts.ma_days and opts.ma_weeks then
+        opts.ma_days = math.floor(opts.ma_weeks * wk + 0.5)
+    end
+    if not opts.flat_lookback and opts.flat_weeks then
+        opts.flat_lookback = math.floor(opts.flat_weeks * wk + 0.5)
+    end
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
     local fetch = prefetch(list, opts)
     local hits, checked, skipped = {}, 0, {}
-    for _, item in ipairs(list) do
+    for i, item in ipairs(list) do
+        -- Five thousand stocks read from disk is ten seconds of work, and the
+        -- host serves every other request from this same thread: hand it back
+        -- now and then, so the rest of the page still answers meanwhile.
+        if i % 200 == 0 then sched_sleep(1) end
         local px, why = bars_for(item.code, opts)
         if not px or #px < (opts.ma_days or d.ma_days) + (opts.flat_lookback or d.flat_lookback) + 1 then
             skipped[#skipped + 1] = { code = item.code,
@@ -360,7 +414,9 @@ function g_exports.strategy_scan(opts)
         params = { ma_days = opts.ma_days or d.ma_days, above_pct = opts.above_pct or d.above_pct,
                    flat_max = opts.flat_max or d.flat_max,
                    flat_lookback = opts.flat_lookback or d.flat_lookback,
-                   min_day_gain = opts.min_day_gain or d.min_day_gain },
+                   min_day_gain = opts.min_day_gain or d.min_day_gain,
+                   ma_weeks = weeks(opts.ma_days or d.ma_days),
+                   flat_weeks = weeks(opts.flat_lookback or d.flat_lookback) },
         hits = util_json_array(hits), skipped = util_json_array(skipped),
         note = '这是信号，不是结论：它只说价格从一个平台上走了出来，' ..
                '这家公司值不值得买仍然要看财报、估值和检查清单。',

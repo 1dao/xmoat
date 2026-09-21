@@ -301,8 +301,11 @@ function g_exports.quote_prefetch(codes, opts)
             next_index = i + 1
             local code = queue[i]
             local doc = quote_load(code)
-            local fresh = doc and (doc.source or 'em') == source and not opts.force
-                and not quote_is_stale(doc)
+            -- Fresh is fresh, whichever source filled it: bars are bars to a
+            -- scan. Replacing a watched stock's Eastmoney series with TDX's
+            -- would cost it the turnover (so the chips) and cost the next
+            -- check a whole refetch from the source that blocks addresses.
+            local fresh = doc and not opts.force and not quote_is_stale(doc)
             if fresh then
                 out.cached = out.cached + 1
             else

@@ -175,7 +175,14 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   Eastmoney stays serial, because parallel HTTPS is what makes it refuse.
 - `engine/strategy.lua` is one rule across many stocks: `strategy_sweep` pools
   every signal into one sample per parameter cell (one stock's history is one
-  path), `strategy_scan` asks who is firing now. Both prefetch first.
+  path), `strategy_scan` asks who is firing now. Both prefetch first, and a
+  fresh cache counts whichever source filled it — a scan must not trade a
+  watched stock's Eastmoney bars (turnover, chips) for TDX's.
+- `strategy_rules` is what the web page's 内置规则 lists: each rule's fields
+  with defaults read from config (weeks where the rule is said in weeks), so
+  no client carries its own copy of the fitted numbers. A scan of the whole
+  market hands the thread back every 200 stocks; the host serves everything
+  else from that same thread.
 
 ## Screening
 
