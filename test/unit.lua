@@ -1412,6 +1412,19 @@ local function test_breakout()
     eq('a standing breakout is one signal', #backtest_breakout(sustained,
         { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6, cooldown = 20 }).entries, 1)
 
+    -- The rule's own numbers come from config, so changing them is a config
+    -- change and not a code change — and the fallbacks are what xmoat.cfg says.
+    local d = backtest_breakout_params()
+    eq('the window is the fitted one', d.ma_days, 40)
+    eq('so is the breakout threshold', d.above_pct, 3)
+    eq('and the flatness tolerance', d.flat_max, 1)
+    eq('with the window it is judged over', d.flat_lookback, 25)
+    -- Same bars, once with the defaults and once naming them: same answer.
+    eq('an unnamed parameter falls back to the configured one',
+        #backtest_breakout(px, {}).entries,
+        #backtest_breakout(px, { ma_days = d.ma_days, above_pct = d.above_pct,
+                                 flat_max = d.flat_max, flat_lookback = d.flat_lookback }).entries)
+
     -- The grid, and what is done with it.
     local rows = backtest_sweep_grid(sustained, { horizon = 5, ma_days = { 40, 50 },
                                                   above_pct = { 4, 6 }, flat_max = { 2, 3 } })

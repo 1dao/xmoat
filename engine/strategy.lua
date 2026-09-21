@@ -132,13 +132,14 @@ function g_exports.strategy_collect(px, opts)
     local mas = opts.ma_days or { 30, 40, 50, 60, 70 }
     local aboves = opts.above_pct or { 3, 4, 5, 6, 7, 8, 10 }
     local flats = opts.flat_max or { 1, 2, 3 }
+    local d = backtest_breakout_params()
     local out = {}
     for _, n in ipairs(mas) do
         local ma = backtest_ma_series(px, n)
         for _, flat in ipairs(flats) do
             for _, above in ipairs(aboves) do
                 local found = backtest_breakout(px, {
-                    ma = ma, ma_days = n, flat_lookback = opts.flat_lookback,
+                    ma = ma, ma_days = n, flat_lookback = opts.flat_lookback or d.flat_lookback,
                     flat_max = flat, above_pct = above,
                     min_day_gain = opts.min_day_gain, cooldown = opts.cooldown,
                 })
@@ -301,6 +302,7 @@ end
 function g_exports.strategy_scan(opts)
     opts = util_copy(opts)
     local days = math.max(1, math.min(opts.days or 1, 20))
+    local d = backtest_breakout_params()
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
@@ -308,15 +310,17 @@ function g_exports.strategy_scan(opts)
     local hits, checked, skipped = {}, 0, {}
     for _, item in ipairs(list) do
         local px, why = bars_for(item.code, opts)
-        if not px or #px < (opts.ma_days or 50) + (opts.flat_lookback or 25) + 1 then
+        if not px or #px < (opts.ma_days or d.ma_days) + (opts.flat_lookback or d.flat_lookback) + 1 then
             skipped[#skipped + 1] = { code = item.code,
                                       reason = px and '日线太短' or tostring(why) }
         else
             checked = checked + 1
             -- cooldown 1: a scan asks "is it firing", not "how often has it".
             local found = backtest_breakout(px, {
-                ma_days = opts.ma_days or 50, flat_lookback = opts.flat_lookback,
-                flat_max = opts.flat_max or 2, above_pct = opts.above_pct or 6,
+                ma_days = opts.ma_days or d.ma_days,
+                flat_lookback = opts.flat_lookback or d.flat_lookback,
+                flat_max = opts.flat_max or d.flat_max,
+                above_pct = opts.above_pct or d.above_pct,
                 min_day_gain = opts.min_day_gain, cooldown = 1,
             })
             -- The newest signal per stock and no more: with a window of
@@ -353,9 +357,10 @@ function g_exports.strategy_scan(opts)
     end
     return {
         universe = kind, checked = checked, days = days, fetch = fetch,
-        params = { ma_days = opts.ma_days or 50, above_pct = opts.above_pct or 6,
-                   flat_max = opts.flat_max or 2, flat_lookback = opts.flat_lookback or 25,
-                   min_day_gain = opts.min_day_gain or 0 },
+        params = { ma_days = opts.ma_days or d.ma_days, above_pct = opts.above_pct or d.above_pct,
+                   flat_max = opts.flat_max or d.flat_max,
+                   flat_lookback = opts.flat_lookback or d.flat_lookback,
+                   min_day_gain = opts.min_day_gain or d.min_day_gain },
         hits = util_json_array(hits), skipped = util_json_array(skipped),
         note = '这是信号，不是结论：它只说价格从一个平台上走了出来，' ..
                '这家公司值不值得买仍然要看财报、估值和检查清单。',
@@ -425,6 +430,7 @@ function g_exports.strategy_attribute(opts)
     opts = util_copy(opts)
     local horizon = opts.horizon or 60
     local min_signals = opts.min_signals or 30
+    local d = backtest_breakout_params()
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
@@ -440,15 +446,17 @@ function g_exports.strategy_attribute(opts)
 
     for _, item in ipairs(list) do
         local px, why = bars_for(item.code, opts)
-        if not px or #px < horizon + (opts.ma_days or 50) + (opts.flat_lookback or 25) then
+        if not px or #px < horizon + (opts.ma_days or d.ma_days) + (opts.flat_lookback or d.flat_lookback) then
             skipped[#skipped + 1] = { code = item.code, reason = px and '日线太短' or tostring(why) }
         else
             used = used + 1
             local g = groups_of({ code = item.code, industry = item.industry,
                                   board = item.board }, regions)
             local found = backtest_breakout(px, {
-                ma_days = opts.ma_days or 50, flat_lookback = opts.flat_lookback,
-                flat_max = opts.flat_max or 2, above_pct = opts.above_pct or 6,
+                ma_days = opts.ma_days or d.ma_days,
+                flat_lookback = opts.flat_lookback or d.flat_lookback,
+                flat_max = opts.flat_max or d.flat_max,
+                above_pct = opts.above_pct or d.above_pct,
                 min_day_gain = opts.min_day_gain, cooldown = opts.cooldown,
             })
             for _, k in ipairs(kinds) do
@@ -506,9 +514,11 @@ function g_exports.strategy_attribute(opts)
     return {
         universe = kind, stocks = used, skipped = util_json_array(skipped), fetch = fetch,
         horizon = horizon, min_signals = min_signals,
-        params = { ma_days = opts.ma_days or 50, above_pct = opts.above_pct or 6,
-                   flat_max = opts.flat_max or 2, flat_lookback = opts.flat_lookback or 25,
-                   min_day_gain = opts.min_day_gain or 0, cooldown = opts.cooldown or 20 },
+        params = { ma_days = opts.ma_days or d.ma_days, above_pct = opts.above_pct or d.above_pct,
+                   flat_max = opts.flat_max or d.flat_max,
+                   flat_lookback = opts.flat_lookback or d.flat_lookback,
+                   min_day_gain = opts.min_day_gain or d.min_day_gain,
+                   cooldown = opts.cooldown or d.cooldown },
         regions = regions and { fetched_at = regions.fetched_at, stocks = regions.stocks } or nil,
         groups = util_json_array(out),
         summary = { ranked = ranked_total, beat_own_baseline = beat },

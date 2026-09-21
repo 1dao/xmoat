@@ -34,7 +34,7 @@ local SIGNALS = {
     trend = '技术面：均线多头排列',
     value_trend = '两者同时满足：便宜，而且已经不再下跌',
     band = '你设置的合理区间：锚指标低于区间下沿',
-    breakout = '均线走平之后，股价放到均线上方一定幅度（默认 10 周均线 + 6%）',
+    breakout = '均线走平之后，股价放到均线上方一定幅度（默认 8 周均线 + 3%，来自网格拟合）',
 }
 
 g_exports.backtest_signal_list = SIGNALS
@@ -42,6 +42,30 @@ g_exports.backtest_signal_list = SIGNALS
 -- A breakout rule reads prices and nothing else, so it needs no valuation
 -- history and is scanned over the bars directly.
 local PRICE_ONLY = { breakout = true }
+
+-- The rule's numbers, in one place, from config.
+--
+-- THESE ARE THE GRID'S ANSWER, NOT A TRUTH. strategy.sweep over 5,254 stocks
+-- and five years put the best median return at a 40-day average (eight weeks)
+-- broken by three percent, with the average flat to within one percent over
+-- the preceding five weeks — a median 60-day return 2.6 points above buying on
+-- any day of the same window, and a win rate 7 points above it. Requiring the
+-- base to be flat for ten weeks instead of five measured +3.0 and +7: the same
+-- thing, within noise, on half the signals. The starting guess of a 10-week
+-- average broken by 6% was positive too, by about a point.
+--
+-- So: a lower breakout threshold is what carried the edge, not a longer base.
+-- Change these when a grid says something different, and say which grid.
+function g_exports.backtest_breakout_params()
+    return {
+        ma_days = cfg_int('BREAKOUT_MA_DAYS', 40),
+        above_pct = cfg_num('BREAKOUT_ABOVE_PCT', 3),
+        flat_max = cfg_num('BREAKOUT_FLAT_MAX', 1),
+        flat_lookback = cfg_int('BREAKOUT_FLAT_LOOKBACK', 25),
+        min_day_gain = cfg_num('BREAKOUT_MIN_DAY_GAIN', 0),
+        cooldown = cfg_int('BACKTEST_COOLDOWN', 20),
+    }
+end
 
 -- Ten weeks of trading days. A "10 周均线" on daily bars is this many closes;
 -- computing it on weekly bars instead would move the signal to Friday and lose
@@ -67,23 +91,26 @@ end
 -- window, just the bars.
 --
 -- opts = {
---   ma_days = 50,          -- the average's window; 50 is ten weeks
---   flat_lookback = 25,    -- over how many days "flat" is judged (five weeks)
---   flat_max = 2,          -- how much it may have moved in that time, %
---   above_pct = 6,         -- how far above the average the close must be, %
---   min_day_gain = 0,      -- and how much the day itself must have risen, %
---   cooldown = 20,
+--   ma_days,               -- the average's window in trading days (40 = 8 weeks)
+--   flat_lookback,         -- over how many days "flat" is judged
+--   flat_max,              -- how much it may have moved in that time, %
+--   above_pct,             -- how far above the average the close must be, %
+--   min_day_gain,          -- and how much the day itself must have risen, %
+--   cooldown,
+-- Anything left out comes from backtest_breakout_params (config).
 --   ma = <a prepared series>,
 -- }
 function g_exports.backtest_breakout(px, opts)
     opts = opts or {}
     px = px or {}
-    local n = opts.ma_days or 50
-    local look = opts.flat_lookback or 25
-    local flat_max = opts.flat_max or 2
-    local above = (opts.above_pct or 6) / 100
-    local day_gain = opts.min_day_gain or 0
-    local cooldown = opts.cooldown or 20
+    -- Anything the caller did not name falls back to the configured rule.
+    local d = backtest_breakout_params()
+    local n = opts.ma_days or d.ma_days
+    local look = opts.flat_lookback or d.flat_lookback
+    local flat_max = opts.flat_max or d.flat_max
+    local above = (opts.above_pct or d.above_pct) / 100
+    local day_gain = opts.min_day_gain or d.min_day_gain
+    local cooldown = opts.cooldown or d.cooldown
 
     local ma = opts.ma or backtest_ma_series(px, n)
     local entries, tested, last_fire = {}, 0, nil
