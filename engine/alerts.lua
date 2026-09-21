@@ -103,17 +103,22 @@ end
 -- A flush already in progress makes this a no-op that says so; the running one
 -- will not see events recorded after it started, and the next flush will.
 --
--- opts = { review, review_alone }: the daily check hands in the market review
--- so it rides along at the end of the digest rather than arriving as a second
--- message. `review_alone` sends it even when nothing is pending, which is the
--- difference between "tell me when something happened" and "tell me every
--- trading day" — PUSH_REVIEW picks between them.
+-- opts = { review, review_alone, problems }: the daily check hands in the
+-- market review so it rides along at the end of the digest rather than
+-- arriving as a second message. `review_alone` sends it even when nothing is
+-- pending, which is the difference between "tell me when something happened"
+-- and "tell me every trading day" — PUSH_REVIEW picks between them.
+--
+-- `problems` is what the check could not fetch. It is sent even when nothing
+-- is pending: "no alerts" from a check that could not see is not the same
+-- news as "no alerts", and on a quiet day nothing else would say so.
 function g_exports.alerts_flush(opts)
     opts = opts or {}
     if flushing then return { sent = 0, busy = true, channels = util_json_array({}) } end
     local brief = opts.review and report_review_brief(opts.review) or nil
+    local trouble = report_problems_brief(opts.problems)
     local pending = alerts_pending()
-    if #pending == 0 and not (brief and opts.review_alone) then
+    if #pending == 0 and not trouble and not (brief and opts.review_alone) then
         return { sent = 0, channels = util_json_array({}) }
     end
 
@@ -125,6 +130,12 @@ function g_exports.alerts_flush(opts)
 
     flushing = true
     local ok, result = pcall(function()
+        -- The problems before the review: when a message is cut to fit, the
+        -- review is the part to lose. And the review goes along whenever it
+        -- was asked for at all, since the message is going out anyway.
+        local tail = {}
+        if trouble then tail[#tail + 1] = trouble end
+        if brief then tail[#tail + 1] = brief end
         local msg
         if #pending > 0 then
             msg = {
@@ -133,14 +144,17 @@ function g_exports.alerts_flush(opts)
                 text = report_events_text(pending),
                 events = pending,
             }
-            if brief then
-                msg.markdown = msg.markdown .. '\n\n' .. brief
-                msg.text = msg.text .. '\n\n' .. brief
+            for _, part in ipairs(tail) do
+                msg.markdown = msg.markdown .. '\n\n' .. part
+                msg.text = msg.text .. '\n\n' .. part
             end
         else
-            -- Nothing changed, but the review was asked for every trading day.
-            msg = { title = 'xmoat 收盘复盘 ' .. tostring(opts.review.as_of or util_today()),
-                    markdown = brief, text = brief, events = {} }
+            -- Nothing changed, but something could not be fetched, or the
+            -- review was asked for every trading day.
+            local body = table.concat(tail, '\n\n')
+            msg = { title = trouble and 'xmoat 检查：有数据没取到'
+                        or 'xmoat 收盘复盘 ' .. tostring(opts.review.as_of or util_today()),
+                    markdown = body, text = body, events = {} }
         end
         local results = notify_send(msg)
         local delivered = false
@@ -156,7 +170,7 @@ function g_exports.alerts_flush(opts)
         end
         if #pending > 0 then save() end
         return { sent = delivered and #pending or 0, review = brief ~= nil or nil,
-                 channels = util_json_array(results) }
+                 problems = trouble ~= nil or nil, channels = util_json_array(results) }
     end)
     flushing = false
     if not ok then
@@ -179,17 +193,26 @@ end
 -- COROUTINE-ONLY. Refresh every watched stock (recording events as each
 -- refresh does), then push what is pending. The scheduled check and the
 -- "check now" command are both this. Returns
---   { refreshed = { {code, ok, error?} }, new_events = n, push = <flush result> }
+--   { refreshed = { {code, ok, error?} }, new_events = n, push = <flush result>,
+--     problems = { {kind, code?, name?, error} } }
 function g_exports.alerts_run()
     if running then return nil, 'conflict', '已有一次检查正在进行' end
     running = true
     local ok, result = pcall(function()
         local seq_before = doc.seq
-        local refreshed = {}
+        local refreshed, problems = {}, {}
         for _, e in ipairs(watch_list()) do
-            local rec, ecode, emsg = stock_refresh(e.code)
+            local rec, ecode, emsg, warn = stock_refresh(e.code)
             refreshed[#refreshed + 1] = rec and { code = e.code, ok = true }
                 or { code = e.code, ok = false, error = { code = ecode, message = emsg } }
+            if not rec then
+                local kept = stock_load(e.code)
+                problems[#problems + 1] = { kind = 'refresh', code = e.code,
+                                            name = kept and kept.name, error = tostring(emsg) }
+            elseif warn and warn.prices then
+                problems[#problems + 1] = { kind = 'prices', code = e.code, name = rec.name,
+                                            error = warn.prices }
+            end
         end
         -- A new annual report is the moment a reading is worth paying for.
         -- Generated before the flush so it goes out in the same digest.
@@ -223,23 +246,35 @@ function g_exports.alerts_run()
         local review
         if mode == 'digest' or mode == 'always' then
             local rok, r = pcall(review_build, {})
-            if rok and type(r) == 'table' then review = r
-            else cfg_log_warn('review for the digest failed: %s', tostring(r)) end
+            if rok and type(r) == 'table' then
+                review = r
+                for _, ix in ipairs(r.market and r.market.indexes or {}) do
+                    if ix.error then
+                        problems[#problems + 1] = { kind = 'index', code = ix.code, name = ix.name,
+                                                    error = ix.error }
+                    end
+                end
+            else
+                cfg_log_warn('review for the digest failed: %s', tostring(r))
+                problems[#problems + 1] = { kind = 'review', error = tostring(r) }
+            end
         end
 
         -- A background flush started by an earlier refresh may still be
         -- sending; it cannot see what this run recorded, and flushing now
         -- would only report busy and leave those alerts for tomorrow's check.
         sched_wait_until(function() return not flushing end, 120000)
-        local push = alerts_flush({ review = review, review_alone = mode == 'always' })
-        return { refreshed = util_json_array(refreshed), new_events = doc.seq - seq_before, push = push }
+        local push = alerts_flush({ review = review, review_alone = mode == 'always',
+                                    problems = problems })
+        return { refreshed = util_json_array(refreshed), new_events = doc.seq - seq_before,
+                 problems = util_json_array(problems), push = push }
     end)
     running = false
     if not ok then
         cfg_log_error('alerts run raised: %s', tostring(result))
         return nil, 'internal', '检查时出错'
     end
-    cfg_log_system('check finished: %d stock(s), %d new alert(s), %d pushed',
-        #result.refreshed, result.new_events, result.push.sent or 0)
+    cfg_log_system('check finished: %d stock(s), %d new alert(s), %d pushed, %d data problem(s)',
+        #result.refreshed, result.new_events, result.push.sent or 0, #result.problems)
     return result
 end

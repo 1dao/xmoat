@@ -255,6 +255,17 @@ local function as_of(rec)
     return rows[#rows] and rows[#rows].date or nil
 end
 
+-- The day the old record's price alerts were judged on: the last bar it had.
+-- Usually its valuation day, but not when that refresh could not get prices —
+-- then it judged on older bars, and cutting at the valuation day now would
+-- hand it bars it never saw. A crossing on the day the prices failed would be
+-- counted as already known, and never announced. Records written before the
+-- field existed fall back to the valuation day.
+local function judged_on(rec)
+    if type(rec.quotes_as_of) == 'string' then return rec.quotes_as_of end
+    return as_of(rec)
+end
+
 -- The bars up to `date`. The old side of the comparison has to see the market
 -- as it was on its own day: judging yesterday's close against today's moving
 -- average would invent crossings that never happened.
@@ -283,7 +294,7 @@ function g_exports.events_diff(old, new, watch, opts)
     diff_reports(old, new, out)
     diff_dividends(old, new, out)
     local old_a = analysis_build(old, watch, { dcf = opts.dcf, levels = opts.levels,
-                                               quotes = quotes_upto(opts.quotes, as_of(old)) })
+                                               quotes = quotes_upto(opts.quotes, judged_on(old)) })
     local new_a = analysis_build(new, watch, { dcf = opts.dcf, levels = opts.levels,
                                                quotes = opts.quotes })
     diff_band(old_a, new_a, out, new)

@@ -584,6 +584,37 @@ local function test_position_events()
     check('only for a holder', kinds_of(events_diff(before, after, watch, topts)).trend == nil)
     eq('and not again while they stay that way', kinds_of(events_diff(after, after, held, topts)).trend, nil)
 
+    -- The day no source would give prices. The valuation moved on to day 260,
+    -- by which the averages had turned, but the judgement was made on the bars
+    -- there were, ending at day 199. The next refresh has to compare against
+    -- that, or the turn counts as already known and is never announced.
+    local function bars_to(n)
+        local rows = {}
+        for i = 1, n do rows[i] = px[i] end
+        return { rows = rows, last_date = dates[n] }
+    end
+    local with_prices = util_copy(opts)
+    with_prices.quotes = bars_to(260)
+    eq('had the prices arrived on day 260, it was a turn',
+        kinds_of(events_diff(before, record_to(260), held, with_prices)).trend ~= nil, true)
+    local failed = record_to(260)
+    failed.quotes_as_of = dates[199]
+    local stale_bars = util_copy(opts)
+    stale_bars.quotes = bars_to(199)
+    eq('on the old bars the failed day sees no turn',
+        kinds_of(events_diff(before, failed, held, stale_bars)).trend, nil)
+    local recovered = kinds_of(events_diff(failed, after, held, topts))
+    eq('so the next refresh with prices announces it', recovered.trend and recovered.trend.title,
+        '均线转为多头排列')
+    eq('which it would not, judging the old side at its valuation day',
+        kinds_of(events_diff(record_to(260), after, held, topts)).trend, nil)
+    -- The other way round: bars newer than the valuation when it was judged.
+    -- The turn was announced then, and must not be announced again.
+    local ahead = record_to(199)
+    ahead.quotes_as_of = dates[260]
+    eq('a turn judged on bars ahead of the valuation is not repeated',
+        kinds_of(events_diff(ahead, after, held, topts)).trend, nil)
+
     -- Validation, through the command path.
     eq('add the stock', api_call('watchlist.add', { code = '600519' }).ok, true)
     eq('a negative size is refused', api_call('watchlist.update',
@@ -832,6 +863,42 @@ local function test_alerts(evs)
     eq('then it is the whole message', sent[1].body.markdown.content, brief)
     eq('with nothing counted as an alert', ritual.sent, 0)
     eq('but the review reported', ritual.review, true)
+
+    -- A check that could not fetch everything. Nothing is pending, the review
+    -- is not asked for every day, and it still goes out: "no alerts" from a
+    -- check that could not look is different news.
+    sent = {}
+    review.market.indexes[1].date = '2026-09-18'
+    review.market.indexes[1].error = 'connection closed before full response (eof)'
+    local problems = {
+        { kind = 'prices', code = '600000', name = '测试银行股份',
+          error = '行情获取失败：东方财富 connection closed before full response (eof)；通达信 '
+              .. string.rep('没有可用的行情服务器 ', 40) },
+        { kind = 'index', code = '000300', name = '沪深300', error = 'connection closed' },
+    }
+    local told = alerts_flush({ review = review, problems = problems })
+    eq('a check that could not fetch says so with nothing pending', #sent, 1)
+    local tb = sent[1] and sent[1].body.markdown.content or ''
+    check('naming the stock and what it went without', tb:find('测试银行股份（600000）日线', 1, true), tb)
+    check('and what that means for its alerts', tb:find('下一次检查里补上', 1, true), tb)
+    check('with each reason clipped, not the whole server list', #tb < 1500, #tb)
+    check('the review rides along, marking the index it could not update',
+        tb:find('沪深300 4507.39 +1.06%（2026-09-18，未更新）', 1, true), tb)
+    check('after the problems, so a cut loses the review first',
+        (tb:find('没取到', 1, true) or 1e9) < (tb:find('收盘复盘', 1, true) or 0), tb)
+    eq('nothing is counted as an alert', told.sent, 0)
+    eq('but the problems are reported', told.problems, true)
+
+    sent = {}
+    alerts_record({ { id = 'unit-d', code = '600000', name = '测试银行股份', kind = 'level',
+                      title = '涨到目标价', detail = '收盘 12.00' } })
+    alerts_flush({ problems = problems })
+    local tb2 = sent[1] and sent[1].body.markdown.content or ''
+    check('with an alert, the problems follow it in the same message',
+        (tb2:find('涨到目标价', 1, true) or 1e9) < (tb2:find('没取到', 1, true) or 0), tb2)
+    sent = {}
+    alerts_flush({ problems = {} })
+    eq('and an empty list is nothing to say', #sent, 0)
 
     __net_set_transport(nil)
     __notify_set_channels(nil)
@@ -1302,6 +1369,33 @@ local function test_quote()
     check('that names both sources', both.error and both.error.message:find('东方财富', 1, true)
         and both.error.message:find('通达信', 1, true), both.error and both.error.message)
     eq('and the TDX copy is kept as it was', quote_status('600519').last_date, '2026-09-18')
+
+    -- A refresh with no prices from anywhere keeps the rest, and says so.
+    local rec, _, _, warn = stock_refresh('600519')
+    check('the record is still refreshed', rec ~= nil)
+    check('and says what it went without', warn and warn.prices and warn.prices:find('通达信', 1, true),
+        warn and warn.prices)
+    eq('remembering the bars it judged on, not its valuation day',
+        rec and stock_load('600519').quotes_as_of, '2026-09-18')
+
+    -- The same day as a scheduled check sees it.
+    api_call('watchlist.add', { code = '600519' })
+    __notify_set_channels({})
+    local run = api_call('alerts.run')
+    local seen = {}
+    for _, p in ipairs(run.ok and run.data.problems or {}) do seen[p.kind .. ':' .. tostring(p.code)] = p end
+    check('the check reports the stock it has no prices for', seen['prices:600519'] ~= nil,
+        run.ok and util_json_encode(run.data.problems) or (run.error and run.error.message))
+    check('by name', seen['prices:600519'] and seen['prices:600519'].name == '贵州茅台')
+    __notify_set_channels(nil)
+    api_call('watchlist.remove', { code = '600519' })
+
+    -- And the review, forced past its cache, marks the index it could not update.
+    local rv = review_build({ force = true })
+    local ix300
+    for _, x in ipairs(rv.market.indexes) do if x.code == '000300' then ix300 = x end end
+    check('an index served from the cache after a failed fetch says why',
+        ix300 and ix300.error and ix300.error:find('通达信', 1, true), ix300 and ix300.error)
 
     -- Eastmoney answers again: the next request asks it first, as ever, and
     -- the whole series comes back from it.

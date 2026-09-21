@@ -102,6 +102,11 @@ end
 -- COROUTINE-ONLY. Fetch and store. Returns the record, or nil plus
 -- (error code, message). A second refresh of the same stock while one is
 -- running waits for it instead of fetching twice.
+--
+-- A fourth value, `warnings`, says what the refresh went on without:
+-- { prices = message } when no source would give today's bars. The record is
+-- still good, but the check needs to say that its price alerts were judged on
+-- older bars, and nothing else could tell it.
 function g_exports.stock_refresh(code)
     local sec, serr = source_em_security(code)
     if not sec then return nil, 'bad_request', serr end
@@ -114,6 +119,7 @@ function g_exports.stock_refresh(code)
         return nil, 'upstream', '并发的刷新失败了'
     end
     inflight[code] = true
+    local warnings
     local ok, rec, ecode, emsg = pcall(function()
         local old, lerr = stock_load(code)
         if lerr then cfg_log_warn('%s: stored data unreadable, refetching all: %s', code, lerr) end
@@ -168,7 +174,13 @@ function g_exports.stock_refresh(code)
         -- When it refuses, quote_refresh retries on TDX — today's close
         -- without chips, rather than judging today on last week's bars.
         local qdoc, _, qerr = quote_refresh(code, { source = 'em' })
-        if not qdoc then cfg_log_warn('%s: price refresh failed: %s', code, tostring(qerr)) end
+        if not qdoc then
+            cfg_log_warn('%s: price refresh failed: %s', code, tostring(qerr))
+            warnings = { prices = tostring(qerr) }
+        end
+        -- The bars this refresh judges with: the ones it just extended, or
+        -- the cached ones when it could not.
+        local quotes = qdoc or quote_series(code, { offline = true })
 
         -- Business breakdown and the management review. Not needed by any
         -- number above, so a failure keeps the previous copy and the refresh.
@@ -194,6 +206,11 @@ function g_exports.stock_refresh(code)
             balance = util_json_array(balance),
             dividends = util_json_array(divs),
             business = business,
+            -- The last bar the technical judgement below was made on. It is
+            -- not the valuation day when prices could not be fetched, and the
+            -- next refresh must compare against what was judged, not against
+            -- a day whose bars arrived later: see events_diff.
+            quotes_as_of = quotes and quotes.last_date or nil,
             sources = util_json_array({
                 { name = '东方财富', dataset = 'RPT_F10_FINANCE_MAINFINADATA', item = '主要财务指标', fetched_at = now },
                 { name = '东方财富', dataset = 'RPT_VALUEANALYSIS_DET', item = '每日估值', fetched_at = now },
@@ -213,9 +230,8 @@ function g_exports.stock_refresh(code)
         if watch then
             local eok, eerr = pcall(function()
                 local eopts = stock_event_opts()
-                -- The bars this refresh just extended: the level and trend
-                -- events are computed from them.
-                eopts.quotes = qdoc or quote_series(code, { offline = true })
+                -- The level and trend events are computed from these bars.
+                eopts.quotes = quotes
                 alerts_record(events_diff(old, record, watch, eopts))
             end)
             if not eok then cfg_log_error('%s: event detection failed: %s', code, tostring(eerr)) end
@@ -229,7 +245,7 @@ function g_exports.stock_refresh(code)
         cfg_log_error('%s refresh raised: %s', code, tostring(rec))
         return nil, 'internal', '刷新时出错'
     end
-    return rec, ecode, emsg
+    return rec, ecode, emsg, rec and warnings or nil
 end
 
 local function dcf_params()

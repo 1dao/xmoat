@@ -428,6 +428,7 @@ type Review = {
       close: number, change_pct?: number,
       ma20?: number, ma60?: number, ma250?: number,
       position_250?: number, from_high?: number, volume_ratio?: number,
+      error?: string,                       // 这次没取到行情，这一行是缓存里 date 那天的
     }[],
     regime_index: string,
     regime: {
@@ -508,9 +509,17 @@ type PushResult = {
 type RunResult = {
   refreshed: { code: string, ok: boolean, error?: { code: string, message: string } }[],
   new_events: number,
+  problems: {                               // 这次检查没取到的数据，也会写进推送
+    kind: 'refresh'                         // 这只自选股整个刷新失败
+        | 'prices'                          // 刷新了，但两个行情源都没给出日线
+        | 'index'                           // 复盘里的这个指数用的是缓存
+        | 'review',                         // 复盘没有生成
+    code?: string, name?: string, error: string,
+  }[],
   push: {
     sent: number, skipped?: boolean, busy?: boolean,
     review?: true,                          // 这条推送里带了收盘复盘
+    problems?: true,                        // 这条推送里列了没取到的数据
     channels: PushResult[],
   },
 }

@@ -159,7 +159,7 @@ end
 
 -- One index's line in the first part.
 local function index_row(code, opts)
-    local doc = quote_series('idx:' .. code, opts)
+    local doc, why, err = quote_series('idx:' .. code, opts)
     if not doc or type(doc.rows) ~= 'table' or #doc.rows == 0 then return nil end
     local rows = doc.rows
     local t = tech_build(rows)
@@ -171,6 +171,9 @@ local function index_row(code, opts)
         position_250 = t and t.range_250 and t.range_250.position,
         from_high = t and t.range_250 and t.range_250.from_high,
         volume_ratio = t and t.volume_ratio,
+        -- The fetch failed and this is the cached day. Without it a review
+        -- of last Friday reads like a review of today.
+        error = why == 'stale' and tostring(err) or nil,
     }, rows
 end
 

@@ -93,14 +93,22 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   broken stop is the one message worth a buzz.
 - `events_diff` builds both sides with the same watch entry AND the bars up to
   each side's own day (`quotes_upto`). Judging yesterday's close against
-  today's moving average invents crossings that never happened.
+  today's moving average invents crossings that never happened. The old
+  side's day is `quotes_as_of`, the last bar that record was actually judged
+  on — not its valuation day, which differs when a refresh got no prices;
+  cutting there would treat that day's crossing as already known.
 - The engine never writes a position itself: no broker connection, no way to
   know what was bought.
-- `alerts_flush(opts)` takes `{ review, review_alone }`. The daily check hands
-  in the market review so it rides along at the end of the digest rather than
-  arriving as a second message; `PUSH_REVIEW` (digest | always | off) picks
-  whether a quiet day still sends one. `report_review_brief` is the few-line
-  form — a WeCom app message is 2,000 bytes for everything.
+- `alerts_flush(opts)` takes `{ review, review_alone, problems }`. The daily
+  check hands in the market review so it rides along at the end of the digest
+  rather than arriving as a second message; `PUSH_REVIEW` (digest | always |
+  off) picks whether a quiet day still sends one. `report_review_brief` is the
+  few-line form — a WeCom app message is 2,000 bytes for everything.
+- `problems` is what the check could not fetch (a failed refresh, no bars from
+  either source — `stock_refresh`'s fourth return — or an index the review
+  served from cache — `quote_series` returns `doc, 'stale', why`). It is pushed
+  even on a quiet day, ahead of the review: a check that could not look and a
+  check that found nothing both say "0 alerts" otherwise.
 
 ## The trading calendar
 

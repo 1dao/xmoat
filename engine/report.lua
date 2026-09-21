@@ -4,7 +4,7 @@
 --          report_events_markdown, report_events_text,
 --          report_review_markdown, report_backtest_markdown,
 --          report_review_brief, report_sweep_markdown, report_scan_markdown,
---          report_attribute_markdown
+--          report_attribute_markdown, report_problems_brief
 --
 -- For the CLI now, and for push channels (WeCom, Feishu, Telegram) later: those
 -- run on the backend with no client to render for them, which is why text
@@ -445,6 +445,47 @@ function g_exports.report_scan_markdown(r)
     return table.concat(L, '\n')
 end
 
+-- An index whose fetch failed shows the day it is from, so that last Friday's
+-- close is not read as today's.
+local function stale_mark(ix)
+    if not has(ix.error) then return '' end
+    return string.format('（%s，未更新）', tostring(ix.date or '—'))
+end
+
+-- At most `max` bytes of `s`, cut on a character boundary.
+local function clip(s, max)
+    s = tostring(s or '')
+    if #s <= max then return s end
+    local cut = max
+    while cut > 0 do
+        local b = s:byte(cut + 1)
+        if not b or b < 0x80 or b >= 0xC0 then break end
+        cut = cut - 1
+    end
+    return s:sub(1, cut) .. '…'
+end
+
+local PROBLEM = { prices = '日线', refresh = '刷新失败', index = '指数日线', review = '复盘没有生成' }
+
+-- What a check could not fetch, as a few lines for the push. A check that
+-- finds nothing and a check that could not look both end with no alerts;
+-- this is what tells them apart. Each reason is clipped: two sources failing
+-- can name five servers each, and the message is 2,000 bytes for everything.
+function g_exports.report_problems_brief(problems)
+    if type(problems) ~= 'table' or #problems == 0 then return nil end
+    local L = { '**这次检查有数据没取到**' }
+    local judged = false
+    for _, p in ipairs(problems) do
+        local who = p.code and string.format('%s（%s）', p.name or p.code, p.code) or ''
+        L[#L + 1] = string.format('- %s%s：%s', who, PROBLEM[p.kind] or '数据', clip(p.error, 150))
+        judged = judged or p.kind == 'prices' or p.kind == 'refresh'
+    end
+    if judged then
+        L[#L + 1] = '这些股票的价位和均线提醒是按已有的数据判断的；取到之后，这期间的变化会在下一次检查里补上。'
+    end
+    return table.concat(L, '\n')
+end
+
 -- The review as a few lines, for a push message. The full three-part review
 -- is a page; a WeCom application message is 2,000 bytes, and nobody reads a
 -- page on a phone anyway. So this is the part that survives that cut: where
@@ -464,8 +505,8 @@ function g_exports.report_review_brief(r)
     end
     local ix = {}
     for _, x in ipairs(m.indexes or {}) do
-        ix[#ix + 1] = string.format('%s %s %s', x.name or x.code, num(x.close),
-            signed(x.change_pct, 2))
+        ix[#ix + 1] = string.format('%s %s %s%s', x.name or x.code, num(x.close),
+            signed(x.change_pct, 2), stale_mark(x))
     end
     if #ix > 0 then line(table.concat(ix, ' · ')) end
     local rg, st = m.regime or {}, m.stance or {}
@@ -578,7 +619,7 @@ function g_exports.report_review_markdown(r)
     line('| 指数 | 收盘 | 涨跌 | 近 250 日分位 | 距高点 | 量能 |')
     line('|---|---|---|---|---|---|')
     for _, ix in ipairs(m.indexes or {}) do
-        f('| %s | %s | %s | %s | %s | %s |', ix.name or ix.code, num(ix.close),
+        f('| %s%s | %s | %s | %s | %s | %s |', ix.name or ix.code, stale_mark(ix), num(ix.close),
             report_pct(ix.change_pct, 2), report_pct(ix.position_250, 0),
             report_pct(ix.from_high, 1), num(ix.volume_ratio, 2))
     end

@@ -230,6 +230,13 @@ local function run()
         end
         out(string.format('刷新 %d 只，新提醒 %d 条，推送 %d 条', #r.refreshed, r.new_events,
             r.push and r.push.sent or 0))
+        -- A failed refresh is already printed above; the rest went on without
+        -- some of its data, and that is worth a line each.
+        for _, p in ipairs(r.problems or {}) do
+            if p.kind ~= 'refresh' then
+                err(string.format('%s 没取到（%s）：%s', p.code or '复盘', p.kind, tostring(p.error)))
+            end
+        end
         for _, ch in ipairs(r.push and r.push.channels or {}) do
             out(string.format('  %s：%s', ch.name, ch.ok and '成功' or tostring(ch.error)))
         end

@@ -247,7 +247,8 @@ end
 -- COROUTINE-ONLY. The series every other module reads: cached when it is
 -- recent enough, fetched or extended when it is not. A fetch that fails while
 -- something usable is cached returns the cached copy and logs — a stale close
--- is worth more than no technical section at all.
+-- is worth more than no technical section at all — and says so as the second
+-- and third values ('stale', why), for a caller that must tell its reader.
 --
 -- opts = { force = true, max_age_min = n, offline = true }
 function g_exports.quote_series(code, opts)
@@ -261,7 +262,7 @@ function g_exports.quote_series(code, opts)
     if doc then
         cfg_log_warn('%s: using the cached prices (%s): %s', tostring(code),
             tostring(doc.last_date), tostring(emsg))
-        return doc
+        return doc, 'stale', emsg
     end
     return nil, ecode, emsg
 end
