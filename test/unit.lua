@@ -1559,7 +1559,9 @@ local function test_breakout()
                     high = jump, low = 99, change_pct = day_gain or (jump - 100) }
         return px
     end
-    local BASE = { ma_days = 50, flat_lookback = 40, flat_max = 10, above_pct = 0 }
+    -- The mechanics of the base and the cross, the monthly trend aside: these
+    -- series are too short to have one.
+    local BASE = { ma_days = 50, flat_lookback = 40, flat_max = 10, above_pct = 0, month_up = false }
     local function with(extra)
         local o = util_copy(BASE)
         for k, v in pairs(extra or {}) do o[k] = v end
@@ -1622,9 +1624,37 @@ local function test_breakout()
     eq('a standing breakout is one signal', #backtest_breakout(sustained,
         with({ cooldown = 20 })).entries, 1)
 
+    -- The stock's own monthly trend. A year of rising closes, then two months
+    -- flat at 100, then the cross: the last completed months are above an
+    -- average that is higher than three months before.
+    local function trended(from, to)
+        local rows, n = {}, 460
+        for i = 1, n do
+            local c = i <= 380 and from + (to - from) * i / 380 or 100
+            if i == n then c = 104 end
+            rows[i] = { date = util_date_add_days('2024-01-01', i), close = c, high = c, low = c,
+                        change_pct = i == n and 4 or 0 }
+        end
+        return rows
+    end
+    local rising, falling = trended(60, 100), trended(160, 100)
+    local up = backtest_breakout(rising, with({ month_up = true })).entries
+    eq('out of a base in a stock whose months are rising, the cross counts', #up, 1)
+    check('and says where its monthly average was', up[1] and up[1].month_ma10 and up[1].month_ma10 < 100,
+        up[1] and up[1].month_ma10)
+    eq('the same base and cross in a stock falling for a year does not',
+        #backtest_breakout(falling, with({ month_up = true })).entries, 0)
+    eq('unless the monthly trend is not asked for',
+        #backtest_breakout(falling, with({ month_up = false })).entries, 1)
+    local trend = backtest_month_trend(rising)
+    eq('twelve months of history are too few to call a trend', (trend(300)), false)
+    eq('a whole year and more is enough', (trend(#rising)), true)
+
     -- The rule's own numbers come from config, so changing them is a config
     -- change and not a code change — and the fallbacks are what xmoat.cfg says.
     local d = backtest_breakout_params()
+    eq('the monthly trend is asked for', d.month_up, true)
+    eq('and signals are held back outside a 多头 market', d.bull_only, true)
     eq('the line is the 10-week average', d.ma_days, 50)
     eq('crossed at all, not by a margin', d.above_pct, 0)
     eq('out of a base no wider than 10%', d.flat_max, 10)
@@ -1647,7 +1677,8 @@ local function test_breakout()
 
     -- The grid, and what is done with it.
     local rows = backtest_sweep_grid(sustained, { horizon = 5, ma_days = { 40, 50 },
-                                                  above_pct = { 4, 6 }, flat_max = { 2, 3 } })
+                                                  above_pct = { 4, 6 }, flat_max = { 2, 3 },
+                                                  month_up = false })
     eq('every combination is a row', #rows, 2 * 2 * 2)
     local kept, objective = backtest_sweep_rank(rows, { min_entries = 1, objective = 'median' })
     eq('ranking says what it ranked on', objective, 'median')
@@ -1882,7 +1913,8 @@ local function test_market()
     __tdx_set_transport(nil)
 
     local scan = api_call('strategy.scan', { rule = 'breakout', universe = 'market', limit = 6000,
-                                             ma_weeks = 8, flat_weeks = 5, above_pct = 3, offline = true })
+                                             ma_weeks = 8, flat_weeks = 5, above_pct = 3, offline = true,
+                                             month_up = false })
     check('the rule scans the whole market', scan.ok, scan.error and scan.error.message)
     local sp = scan.ok and scan.data.params or {}
     eq('weeks become trading days', sp.ma_days, 40)
@@ -1893,20 +1925,27 @@ local function test_market()
     check('with the snapshot figures beside it', hit and hit.name == '甲公司' and hit.pe_ttm == 12)
     eq('the one with no bars is skipped, not guessed', scan.ok and #scan.data.skipped, 1)
     eq('at 5% the same day is no signal', #api_call('strategy.scan', { universe = 'market',
-        limit = 6000, ma_weeks = 8, above_pct = 5, offline = true }).data.hits, 0)
+        limit = 6000, ma_weeks = 8, above_pct = 5, offline = true, month_up = false }).data.hits, 0)
     eq('a window given in days and in weeks is refused', api_call('strategy.scan',
         { universe = 'market', ma_days = 40, ma_weeks = 8, offline = true }).error.code, 'bad_request')
     eq('an unknown rule is refused', api_call('strategy.scan',
         { rule = 'nope', universe = 'market', offline = true }).error.code, 'bad_request')
 
-    -- 甲公司 again, but the break came two days ago and it has kept going:
-    -- 104, 105, 106. Only the first of those days is the signal.
+    -- 甲公司 again, the rule as configured: a year of rising prices, two months
+    -- flat at 100, then a break two days ago that has kept going — 104, 105,
+    -- 106. Only the first of those days is the signal.
     local function seed(code, closes)
         local rows = {}
-        local n = 200 + #closes
+        local base_end = 440
+        local n = base_end + #closes
+        local function close_at(i)
+            if i <= 380 then return 60 + 40 * i / 380 end
+            if i <= base_end then return 100 end
+            return closes[i - base_end]
+        end
         for i = 1, n do
-            local c = i <= 200 and 100 or closes[i - 200]
-            local prev = i > 1 and (i - 1 <= 200 and 100 or closes[i - 201]) or c
+            local c = close_at(i)
+            local prev = i > 1 and close_at(i - 1) or c
             rows[i] = { date = util_date_add_days(today, i - n), open = c, close = c, high = c,
                         low = c, change_pct = (c / prev - 1) * 100 }
         end
@@ -1914,6 +1953,18 @@ local function test_market()
             source = 'tdx', fetched_at = util_now_iso(), first_date = rows[1].date,
             last_date = today, rows = util_json_array(rows) })
     end
+    -- 沪深300 through the same days: rising, so 多头, unless told otherwise.
+    local function seed_index(step)
+        local rows = {}
+        for i = 1, 400 do
+            local c = 4000 + step * i
+            rows[i] = { date = util_date_add_days(today, i - 400), open = c, close = c, high = c, low = c }
+        end
+        store_save('quote:idx:000300', { version = 1, code = '000300', kind = 'index', adjust = 'qfq',
+            source = 'em', fetched_at = util_now_iso(), first_date = rows[1].date,
+            last_date = today, rows = util_json_array(rows) })
+    end
+    seed_index(2)
     seed('600001', { 104, 105, 106 })
     seed('300002', { 100 })
     local function scan_of(extra)
@@ -1929,6 +1980,8 @@ local function test_market()
     near('with how far it has gone since', recent and recent.since_pct, (106 / 104 - 1) * 100, 1e-6)
     eq('and today\'s close beside it', recent and recent.last_close, 106)
     near('and how wide its base was', recent and recent.width, 0, 1e-9)
+    eq('on a day the market was 多头', recent and recent.regime, 'bull')
+    eq('so nothing is held back', recent and recent.held, nil)
 
     -- A record kept under the rule's earlier definition says nothing about
     -- this one: it is dropped on load, not mixed in.
@@ -1988,6 +2041,31 @@ local function test_market()
     alerts_flush()
     eq('with nothing new, nothing more is pushed', #pushes, 0)
 
+    -- The market turns. 甲公司's latest break, three days back, is new to the
+    -- record: kept, with the day's state, and not pushed.
+    seed_index(-2)
+    local bear = scan_of({ days = 5, record = true })
+    local bh
+    for _, x in ipairs(bear.hits or {}) do if x.code == '600001' then bh = x end end
+    eq('a signal on a day the market was not 多头 is still listed', bh and bh.code, '600001')
+    eq('with that day\'s state', bh and bh.regime, 'bear')
+    eq('and marked as held back', bh and bh.held, true)
+    eq('the scan says what the market is now', bear.regime and bear.regime.state, 'bear')
+    eq('it is kept in the record', bear.recorded and bear.recorded.added, 1)
+    sched_sleep(50)
+    eq('but not pushed', #pushes, 0)
+    local heldrow
+    for _, s in ipairs(api_call('signals.list', {}).data.items) do
+        if s.regime == 'bear' then heldrow = s end
+    end
+    eq('the record says it was held', heldrow and heldrow.pushed, 'held')
+    pushes = {}
+    alerts_flush({ signals_held = { count = 1, state = 'bear' } })
+    eq('what was held back never sends a message of its own', #pushes, 0)
+    alerts_flush({ problems = { { kind = 'review', error = 'x' } }, signals_held = { count = 1, state = 'bear' } })
+    check('it rides along when one goes out anyway',
+        pushes[1] and pushes[1]:find('另有 1 只新突破', 1, true) and pushes[1]:find('空头', 1, true), pushes[1])
+
     -- A wider window adds older breakouts after newer ones; the record still
     -- reads by signal day.
     signals_record({ configured = true, checked = 1, days = 10, hits = { {
@@ -2003,6 +2081,7 @@ local function test_market()
     __signals_set_daily(false)
     util_file_remove(store_dir() .. '/quotes/600001.json')
     util_file_remove(store_dir() .. '/quotes/300002.json')
+    util_file_remove(store_dir() .. '/quotes/idx-000300.json')
 end
 
 -- ── Phase 5: the insurance and broker templates ─────────────────────────────

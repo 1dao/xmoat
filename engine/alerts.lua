@@ -21,6 +21,7 @@
 
 local MAX_ITEMS = 500
 local MAX_ATTEMPTS = 3
+local REGIME_WORD = { bull = '多头', bear = '空头', range = '震荡', unknown = '指数数据不足' }
 
 local doc = nil           -- { version = 1, seq = n, items = { event, ... } }
 local flushing = false
@@ -142,6 +143,14 @@ function g_exports.alerts_flush(opts)
         local tail = {}
         if trouble then tail[#tail + 1] = trouble end
         if found then tail[#tail + 1] = found end
+        -- What the market switch held back rides along when a message goes out
+        -- anyway, and never sends one of its own: through a long bear market
+        -- that would be the same line every day.
+        local held = opts.signals_held
+        if held and (held.count or 0) > 0 then
+            tail[#tail + 1] = string.format('内置规则另有 %d 只新突破，沪深300 不在多头（%s），按设置没有推送；见网页。',
+                held.count, REGIME_WORD[held.state] or tostring(held.state))
+        end
         if brief then tail[#tail + 1] = brief end
         local msg
         if #pending > 0 then
@@ -275,11 +284,12 @@ function g_exports.alerts_run()
         -- The built-in rule over the whole market, after the close like the
         -- rest of the check. What it finds is new once; only the new ones go
         -- into this push. A failure is a missing section, not a missing check.
-        local signals
+        local signals, signals_held
         if signals_daily() then
             local sok, sres, _, serr = pcall(signals_run, 'daily')
             if sok and sres then
                 signals = sres
+                signals_held = { count = sres.held or 0, state = sres.regime }
             else
                 local why = sok and serr or sres
                 cfg_log_warn('built-in rule failed: %s', tostring(why))
@@ -292,7 +302,7 @@ function g_exports.alerts_run()
         -- would only report busy and leave those alerts for tomorrow's check.
         sched_wait_until(function() return not flushing end, 120000)
         local push = alerts_flush({ review = review, review_alone = mode == 'always',
-                                    problems = problems })
+                                    problems = problems, signals_held = signals_held })
         return { refreshed = util_json_array(refreshed), new_events = doc.seq - seq_before,
                  problems = util_json_array(problems), signals = signals, push = push }
     end)

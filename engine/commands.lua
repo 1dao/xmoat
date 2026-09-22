@@ -627,6 +627,7 @@ local function strategy_params(with_grid)
         include_st = { type = 'boolean' },
         flat_lookback = { type = 'integer', doc = '横盘看前多少个交易日，默认 BREAKOUT_FLAT_LOOKBACK（40，8 周）' },
         min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0' },
+        month_up = { type = 'boolean', doc = '要求个股月线向上（收盘在上升的 10 月均线之上），默认 BREAKOUT_MONTH_UP（开）' },
         offline = { type = 'boolean', doc = '只用本地行情缓存，不联网' },
         price_source = { type = 'string', enum = { 'tdx', 'em' },
                          doc = '行情来源，默认 tdx（通达信协议，可并发）' },
@@ -652,6 +653,8 @@ local function strategy_params(with_grid)
         p.flat_max = { type = 'number', doc = '横盘振幅上限 %，默认 BREAKOUT_FLAT_MAX（10）' }
         p.days = { type = 'integer', doc = '最近几个交易日内出现的信号都算，默认 1' }
         p.rule = { type = 'string', enum = { 'breakout' }, doc = '内置规则，见 strategy.rules；默认 breakout' }
+        p.bull_only = { type = 'boolean',
+                        doc = '沪深300 不在多头的日子，信号标成 held、不推送，默认 BREAKOUT_BULL_ONLY（开）' }
         p.cooldown = { type = 'integer',
                        doc = '两次信号至少隔几个交易日，默认 BACKTEST_COOLDOWN（20），即只看突破第一天；1 = 条件成立的每一天' }
         p.record = { type = 'boolean',
@@ -675,7 +678,7 @@ local function strategy_common(p)
                     cap_min = p.cap_min, industry = p.industry, include_st = p.include_st,
                     sort = 'roe', order = 'desc' },
         flat_lookback = p.flat_lookback, min_day_gain = p.min_day_gain,
-        offline = p.offline,
+        month_up = p.month_up, offline = p.offline,
     }
 end
 
@@ -836,7 +839,7 @@ local function install_strategy()
             local opts = strategy_common(p)
             opts.ma_days, opts.above_pct, opts.flat_max = p.ma_days, p.above_pct, p.flat_max
             opts.ma_weeks, opts.flat_weeks = p.ma_weeks, p.flat_weeks
-            opts.days, opts.cooldown = p.days, p.cooldown
+            opts.days, opts.cooldown, opts.bull_only = p.days, p.cooldown, p.bull_only
             -- A scan of the rule as configured over the whole market is the same
             -- thing the daily check runs: it keeps its finds, and the new ones
             -- are pushed. A variation being tried out is only shown.
@@ -846,9 +849,9 @@ local function install_strategy()
             if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
             if keep then
                 if res.configured then
-                    res.recorded = { added = signals_record(res, 'web'),
-                                     pushing = #notify_channels() > 0 }
-                    if res.recorded.added > 0 then alerts_flush_later() end
+                    local added, held = signals_record(res, 'web')
+                    res.recorded = { added = added, held = held, pushing = #notify_channels() > 0 }
+                    if added > held then alerts_flush_later() end
                 else
                     signals_save()
                     res.recorded = { added = 0, note = '参数和内置默认不同，这次的结果不记入信号记录' }

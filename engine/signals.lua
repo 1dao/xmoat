@@ -23,7 +23,10 @@
 --
 -- PUSHING follows the alert log: `pushed` is false until a digest carrying
 -- it reached a channel, 'skipped' when none was configured, 'failed' after
--- MAX_ATTEMPTS refusals. So each push carries only what is new.
+-- MAX_ATTEMPTS refusals. So each push carries only what is new. 'held' is a
+-- signal on a day the market index was not in its 多头 state while the rule
+-- asks for that (BREAKOUT_BULL_ONLY): kept, with the day's `regime`, so the
+-- record can later say whether the switch was worth it — never pushed.
 --
 -- Stored as data/signals.json, newest first, pruned to SIGNALS_KEEP_DAYS.
 
@@ -32,10 +35,10 @@ local RULE = 'breakout'
 -- Which definition of the rule an entry was found by. 1 was "the 40-day
 -- average flat over five weeks, close 3% above it", which let through prices
 -- swinging 20% around a flat average and ran behind the market; 2 is a real
--- base (the price within 10% for eight weeks) and a cross of the 10-week line.
--- Entries of another definition are dropped on load: two rules in one record
--- say nothing about either.
-local DEF = 2
+-- base (the price within 10% for eight weeks) and a cross of the 10-week line;
+-- 3 adds the stock's own monthly trend. Entries of another definition are
+-- dropped on load: two rules in one record say nothing about either.
+local DEF = backtest_breakout_version
 
 local doc = nil           -- { version = 1, seq = n, items = {...}, last_run = {...} }
 local daily_override = nil
@@ -104,8 +107,9 @@ function g_exports.signals_price_updater()
 end
 
 -- Keep the new ones from a scan of the rule as configured. `source` says what
--- ran it ('daily', 'web', 'cli'). Returns how many were added. Saves either
--- way: the scan may have moved the latest closes.
+-- ran it ('daily', 'web', 'cli'). Returns how many were added, and how many of
+-- those are held back by the market switch. Saves either way: the scan may
+-- have moved the latest closes.
 function g_exports.signals_record(scan, source)
     local known, added = {}, {}
     for _, s in ipairs(doc.items) do known[s.id] = true end
@@ -124,21 +128,26 @@ function g_exports.signals_record(scan, source)
                     added_at = now, added_date = h.last_date, added_close = h.last_close,
                     last_date = h.last_date, last_close = h.last_close,
                     pe_ttm = h.pe_ttm, pb = h.pb, roe = h.roe, market_cap = h.market_cap,
-                    source = source, pushed = false,
+                    regime = h.regime, source = source, pushed = h.held and 'held' or false,
                 }
             end
         end
     end
     -- Newest first; within one run the order the scan gave, strongest first.
     for i = #added, 1, -1 do table.insert(doc.items, 1, added[i]) end
+    local held = 0
+    for _, s in ipairs(added) do
+        if s.pushed == 'held' then held = held + 1 end
+    end
     if type(scan) == 'table' and scan.configured then
         doc.last_run = { at = now, source = source, checked = scan.checked,
-                         found = #(scan.hits or {}), added = #added, days = scan.days }
+                         found = #(scan.hits or {}), added = #added, held = held, days = scan.days,
+                         regime = scan.regime and scan.regime.state }
     end
     prune()
     signals_save()
     if #added > 0 then cfg_log_info('signals: %d new from %s', #added, tostring(source)) end
-    return #added
+    return #added, held
 end
 
 local function pct(now, base)
@@ -238,7 +247,7 @@ function g_exports.signals_run(source)
         on_bars = signals_price_updater(),
     })
     if not res then return nil, ecode, emsg end
-    local added = signals_record(res, source or 'daily')
-    return { checked = res.checked, found = #res.hits, added = added, days = res.days,
-             fetch = res.fetch, params = res.params }
+    local added, held = signals_record(res, source or 'daily')
+    return { checked = res.checked, found = #res.hits, added = added, held = held, days = res.days,
+             regime = res.regime and res.regime.state, fetch = res.fetch, params = res.params }
 end

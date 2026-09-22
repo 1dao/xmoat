@@ -34,10 +34,16 @@ local SIGNALS = {
     trend = '技术面：均线多头排列',
     value_trend = '两者同时满足：便宜，而且已经不再下跌',
     band = '你设置的合理区间：锚指标低于区间下沿',
-    breakout = '横盘之后上穿均线：前 8 周最高价与最低价相差不超过 10%，当天收盘上穿 10 周线（默认值）',
+    breakout = '横盘之后上穿均线：前 8 周最高价与最低价相差不超过 10%，当天收盘上穿 10 周线，个股月线向上（默认值）',
 }
 
 g_exports.backtest_signal_list = SIGNALS
+
+-- Which definition of the breakout rule this is. A record kept under another
+-- (engine/signals.lua) or numbers a browser saved for another (the screen
+-- page) belong to a different rule: 1 was a flat average and 3% above it, 2 a
+-- flat price base crossing the 10-week line, 3 adds the monthly trend.
+g_exports.backtest_breakout_version = 3
 
 -- A breakout rule reads prices and nothing else, so it needs no valuation
 -- history and is scanned over the bars directly.
@@ -59,8 +65,14 @@ function g_exports.backtest_breakout_params()
         above_pct = cfg_num('BREAKOUT_ABOVE_PCT', 0),
         flat_max = cfg_num('BREAKOUT_FLAT_MAX', 10),
         flat_lookback = cfg_int('BREAKOUT_FLAT_LOOKBACK', 40),
+        -- The stock's own monthly trend must be up (backtest_month_trend).
+        month_up = cfg_bool('BREAKOUT_MONTH_UP', true),
+        -- Keep a signal only when the market index is in its 多头 state
+        -- (review_regime). Not part of the rule on one stock's bars: the scan
+        -- and the record apply it, since it needs the index.
         min_day_gain = cfg_num('BREAKOUT_MIN_DAY_GAIN', 0),
         cooldown = cfg_int('BACKTEST_COOLDOWN', 20),
+        bull_only = cfg_bool('BREAKOUT_BULL_ONLY', true),
     }
 end
 
@@ -125,11 +137,56 @@ local function price_range(px, from, to)
     return hi, lo
 end
 
+-- The stock's own long trend, on MONTHLY closes: the close above the average
+-- of the last ten months, and that average higher than three months before.
+-- Returns up(i) -> boolean, the average. Only months that are over count: the
+-- month a day falls in is still moving on that day, and its close would be a
+-- price from the future.
+--
+-- Of nine weekly and monthly rules tried on the whole market, this condition
+-- added to the base breakout was the one ahead of buying on any day in both
+-- 2021-2023 (+5.4 points of 60-day win rate) and 2024-2026 (+0.7). Chasing
+-- weekly strength — the averages lining up, a 26- or 52-week high — was
+-- behind in both, by 4 to 5.5.
+function g_exports.backtest_month_trend(px)
+    local months = {}
+    for i, r in ipairs(px or {}) do
+        local key = tostring(r.date):sub(1, 7)
+        local m = months[#months]
+        local c = util_num(r.close)
+        if m and m.key == key then
+            if c then m.close = c end
+        else
+            months[#months + 1] = { key = key, close = c }
+        end
+    end
+    local function ma10(j)
+        if j < 10 then return nil end
+        local s = 0
+        for q = j - 9, j do
+            if not months[q].close then return nil end
+            s = s + months[q].close
+        end
+        return s / 10
+    end
+    return function(i)
+        local key = tostring(px[i].date):sub(1, 7)
+        local j = #months
+        while j > 0 and months[j].key >= key do j = j - 1 end
+        if j < 13 then return false end
+        local now, before, close = ma10(j), ma10(j - 3), util_num(px[i].close)
+        return (now and before and close and close > now and now > before) or false, now
+    end
+end
+
 function g_exports.backtest_breakout(px, opts)
     opts = opts or {}
     px = px or {}
     -- Anything the caller did not name falls back to the configured rule.
     local d = backtest_breakout_params()
+    local month_up = opts.month_up
+    if month_up == nil then month_up = d.month_up end
+    local trend = opts.month_trend
     local n = opts.ma_days or d.ma_days
     local look = opts.flat_lookback or d.flat_lookback
     local flat_max = opts.flat_max or d.flat_max
@@ -151,12 +208,17 @@ function g_exports.backtest_breakout(px, opts)
                 and (not last_fire or (i - last_fire) >= cooldown) then
                 local hi, lo = price_range(px, i - look, i - 1)
                 local width = (hi and lo and lo > 0) and (hi / lo - 1) * 100 or nil
-                if width and width <= flat_max then
+                local up, m10 = true, nil
+                if width and width <= flat_max and month_up then
+                    trend = trend or backtest_month_trend(px)
+                    up, m10 = trend(i)
+                end
+                if width and width <= flat_max and up then
                     last_fire = i
                     entries[#entries + 1] = { date = px[i].date, index = i, close = close,
                                               ma = line, width = width, box_high = hi, box_low = lo,
                                               above = (close - line) / line * 100,
-                                              day_gain = gain }
+                                              day_gain = gain, month_ma10 = m10 }
                 end
             end
         end
@@ -446,6 +508,8 @@ function g_exports.backtest_sweep_grid(px, opts)
     local look = opts.flat_lookback or backtest_breakout_params().flat_lookback
 
     local rows = {}
+    -- The monthly trend is the same for every cell: worked out once.
+    local trend = backtest_month_trend(px)
     for _, n in ipairs(mas) do
         -- One pass per window, reused by every distance and flatness on it.
         local ma = backtest_ma_series(px, n)
@@ -454,7 +518,7 @@ function g_exports.backtest_sweep_grid(px, opts)
                 local found = backtest_breakout(px, {
                     ma = ma, ma_days = n, flat_lookback = look, flat_max = flat,
                     above_pct = above, min_day_gain = opts.min_day_gain,
-                    cooldown = opts.cooldown,
+                    cooldown = opts.cooldown, month_up = opts.month_up, month_trend = trend,
                 })
                 local hz = backtest_horizons(found.entries, px, { horizon })[1]
                 local barrier = backtest_barrier(found.entries, px, {

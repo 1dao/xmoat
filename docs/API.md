@@ -366,7 +366,8 @@ type Barrier = {
 
 ```ts
 type SweepRow = {
-  ma_days: number, above_pct: number, flat_max: number,
+  ma_days: number, above_pct: number,
+  flat_max: number,                         // 横盘振幅上限 %：横盘期最高价比最低价高出不超过多少
   entries: number, stocks?: number,         // stocks 仅多股票拟合：几只股票出过信号
   n: number,                                // 有完整持有期的次数
   win_rate?: number, avg?: number, median?: number, best?: number, worst?: number,  // %
@@ -377,7 +378,12 @@ type Sweep = {
   code?: string, name?: string,             // 单只股票时
   universe?: 'codes' | 'screen' | 'watchlist', stocks?: number,   // 多只股票时
   signal: 'breakout', signal_note: string,
-  from?: string, to?: string, days?: number,
+  from?: string, to?: string, days?: number, // 多只股票时 from 是最早那只的起始日，别当成样本长度
+  span?: {                                  // 多只股票时：一只典型的股票贡献了多长的日线
+    median_days: number,                    // 每只日线天数的中位数
+    typical_from: string,                   // 多数股票从哪天起
+    earliest_from: string, to: string,
+  },
   horizon: number, objective: 'median' | 'avg' | 'win_rate',
   flat_lookback: number, min_day_gain: number, cooldown: number,
   require_: { min_entries: number, min_win_rate?: number, max_worst?: number, max_sl?: number },
@@ -401,12 +407,15 @@ type MarketList = {
 
 type Rule = {
   id: 'breakout',                           // strategy.scan 的 rule
+  version: number,                          // 规则定义的版本；客户端存下的参数版本不同就作废
   title: string, summary: string,
-  basis: string,                            // 默认值是怎么来的（网格结论）
+  basis: string,                            // 默认值是怎么来的，回测结果如实写着
   fields: {                                 // 原样作为 strategy.scan 的参数
-    name: string, label: string, unit: string,
-    default: number,                        // 当前配置；按周说的窗口可能是 8.4 这样的小数
-    min: number, max: number, step: number,
+    name: string, label: string,
+    type?: 'boolean',                       // 开关（month_up、bull_only）；不写就是数字
+    unit?: string,
+    default: number | boolean,              // 当前配置；按周说的窗口可能是 8.4 这样的小数
+    min?: number, max?: number, step?: number,
   }[],
 }
 
@@ -417,7 +426,10 @@ type Scan = {
             cooldown: number,                 // 两次信号至少隔几个交易日；默认即只看突破第一天
             ma_weeks: number, flat_weeks: number },   // 同两个窗口，按周（一周 5 个交易日）
   configured: boolean,                      // 参数就是内置默认（只有这样的结果会被记录）
-  recorded?: { added: number, pushing?: boolean, note?: string },   // 带 record 且 universe=market 时
+  regime: { index: string, date?: string,   // 大盘（REVIEW_REGIME_INDEX）最新一天的状态
+            state: 'bull' | 'bear' | 'range' | 'unknown' },
+  recorded?: { added: number, held: number,     // 带 record 且 universe=market 时；held：因大盘不推送的
+               pushing?: boolean, note?: string },
   hits: {
     code: string, name?: string, industry?: string,
     date: string, close: number, ma: number, // 信号日（突破第一天）与当天收盘
@@ -426,6 +438,9 @@ type Scan = {
     box_high: number,                       // 横盘区间的顶
     day_gain?: number, bars_ago: number,    // 距今几个交易日
     last_date: string, last_close: number,  // 最新一根 K 线
+    regime: 'bull' | 'bear' | 'range' | 'unknown',   // 信号日大盘的状态
+    held?: true,                            // bull_only 开着而那天不是多头：列出、记录，不推送
+    month_ma10?: number,                    // month_up 开着时：信号日个股的 10 月均线
     since_pct?: number,                     // 信号日以来涨了多少 %
     pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
   }[],                                      // 每只股票只留最近的一次
@@ -444,7 +459,7 @@ type SignalList = {
   total: number, count: number,             // 这段时间里一共几条；这次返回了几条
   daily: boolean,                           // 收盘后的检查会不会自动跑（SIGNALS_DAILY）
   last_run?: { at: string, source: 'daily' | 'web' | 'manual', checked: number,
-               found: number, added: number, days: number },
+               found: number, added: number, held: number, days: number, regime?: string },
   items: {
     code: string, name?: string, industry?: string,
     signal_date: string, signal_close: number,   // 突破第一天
@@ -453,7 +468,8 @@ type SignalList = {
     since_signal_pct?: number, since_added_pct?: number,   // 读取时算
     ma?: number, above?: number, width?: number, day_gain?: number,   // 信号日的均线、高出、横盘振幅
     pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
-    pushed: boolean | 'skipped' | 'failed',
+    regime?: string,                        // 信号日大盘的状态
+    pushed: boolean | 'skipped' | 'failed' | 'held',   // held：大盘不在多头，按设置不推送
   }[],                                      // 新的在前
 }
 ```
@@ -561,7 +577,8 @@ type RunResult = {
         | 'signals',                        // 内置规则没有运行
     code?: string, name?: string, error: string,
   }[],
-  signals?: { checked: number, found: number, added: number, days: number },   // 内置规则这次跑的结果
+  signals?: { checked: number, found: number, added: number, held: number,     // 内置规则这次跑的结果
+              days: number, regime?: string },
   push: {
     sent: number, skipped?: boolean, busy?: boolean,
     review?: true,                          // 这条推送里带了收盘复盘

@@ -180,12 +180,29 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   watched stock's Eastmoney bars (turnover, chips) for TDX's.
 - `strategy_rules` is what the web page's 内置规则 lists: each rule's fields
   with defaults read from config (weeks where the rule is said in weeks), so
-  no client carries its own copy of the fitted numbers. A scan of the whole
+  no client carries its own copy of the numbers. A scan of the whole
   market hands the thread back every 200 stocks; the host serves everything
   else from that same thread.
-- A scan's signal is the FIRST day of a breakout (`cooldown` =
-  BACKTEST_COOLDOWN), the unit the defaults were fitted on; `cooldown=1` is
-  "every day it holds", which ranks last week's chase first.
+- The breakout rule (`backtest_breakout`) measures the base on the PRICE —
+  highest high over lowest low of the `flat_lookback` days before, within
+  `flat_max`% — and fires on the day the close CROSSES the average (at or
+  under it yesterday, over it today), then not again for `cooldown` days. The
+  first version measured a flat AVERAGE, which a price swinging 20% around it
+  also has; it ran 1.6 points behind the market. Defaults: 8 weeks, 10%, the
+  10-week line — the rule as meant, not a fitted edge (+0.4 over five years,
+  inconsistent by year).
+- Two more conditions, both switchable: `month_up` (the stock's close above
+  its 10-month average of COMPLETED months, rising over three months —
+  `backtest_month_trend`, built once per stock and passed as `month_trend`
+  in the grid loops) is part of the rule; `bull_only` is not — it needs the
+  index, so the scan marks a hit `held` when that day's `review_regime` was
+  not bull, the record keeps it as `pushed = 'held'`, and nothing pushes it.
+  Chasing weekly strength (MA alignment, 26/52-week highs) ran 4-5.5 points
+  behind in both halves: do not re-propose it.
+- Before believing any backtest of it: bars must be long (1200 days a stock;
+  a cache prefetched at 400 days once passed for "five years" because the
+  report showed the EARLIEST first day — `span` now gives the median), and
+  signals must be compared with the baseline year by year, not pooled.
 - `engine/signals.lua` keeps what the rule as configured found
   (`scan.configured`): one entry per stock and signal day, with the signal
   close AND the close when it was added, prices moved on by any scan

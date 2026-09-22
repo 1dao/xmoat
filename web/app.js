@@ -1122,6 +1122,7 @@
 
   // A count said in weeks may be 8 or 8.4; either reads as written.
   const fmtCount = v => (isNum(v) ? fmtNum(v, Number.isInteger(v) ? 0 : 1) : '—');
+  const REGIME_WORD = { bull: '多头', bear: '空头', range: '震荡', unknown: '数据不足' };
   // A gain reads as a change, so it carries its sign.
   const fmtGain = v => (isNum(v) ? (v > 0 ? '+' : '') + fmtPct(v) : '—');
 
@@ -1129,15 +1130,27 @@
     const savedAll = (() => {
       try { return JSON.parse(storage(s => s.getItem(RULES_KEY)) || '{}'); } catch (e) { return {}; }
     })();
-    const saved = savedAll[rule.id] || {};
+    // Numbers saved for an earlier definition of the rule mean something else
+    // now (a 1% "flatness" was an average's slope, not a price range): start
+    // from the current defaults instead.
+    const kept = savedAll[rule.id];
+    const saved = kept && kept.v === rule.version ? kept.q || {} : {};
 
     const form = h('form', { class: 'screen-form' });
+    const switches = h('div', { class: 'field' }, h('span', { text: '条件' }), h('div', { class: 'checks-row' }));
     for (const f of rule.fields) {
+      if (f.type === 'boolean') {
+        const on = saved[f.name] !== undefined ? saved[f.name] === 'true' : !!f.default;
+        switches.lastChild.append(h('label', { class: 'check' },
+          h('input', { type: 'checkbox', name: f.name, checked: on }), h('span', { text: f.label })));
+        continue;
+      }
       form.append(h('label', { class: 'field' },
         h('span', { text: `${f.label}（${f.unit}）` }),
         h('input', { type: 'number', step: 'any', name: f.name, min: f.min, max: f.max,
           required: true, value: saved[f.name] ?? f.default })));
     }
+    if (switches.lastChild.childNodes.length) form.append(switches);
     const run = h('button', { class: 'btn btn-primary', type: 'submit', text: '筛选全市场' });
     const reset = h('button', { class: 'btn btn-quiet', type: 'button', text: '恢复默认' });
     form.append(h('div', { class: 'field field-actions' }, run, reset,
@@ -1145,8 +1158,8 @@
         '第一次会用通达信把全市场的日线抓到本地，要一两分钟；之后只补新的几天，十几秒。' })));
 
     const results = h('section', { class: 'card' });
-    const kept = lastScan[rule.id];
-    if (kept) showScan(results, kept.res, kept.at);
+    const last = lastScan[rule.id];
+    if (last) showScan(results, last.res, last.at);
     else results.append(h('p', { class: 'muted', text:
       '点“筛选全市场”，在全部 A 股（不含 ST）里找刚刚首次突破的股票。用默认参数时，结果会记进下面的信号记录。' }));
 
@@ -1156,10 +1169,11 @@
       e.preventDefault();
       const q = {};
       for (const f of rule.fields) {
-        const v = form.elements[f.name].value;
-        if (v !== '') q[f.name] = v;
+        const el = form.elements[f.name];
+        if (f.type === 'boolean') q[f.name] = el.checked ? 'true' : 'false';
+        else if (el.value !== '') q[f.name] = el.value;
       }
-      savedAll[rule.id] = q;
+      savedAll[rule.id] = { v: rule.version, q };
       storage(s => s.setItem(RULES_KEY, JSON.stringify(savedAll)));
       await busy(run, '全市场扫描中…', async () => {
         const res = await api('GET', '/api/v1/strategy/scan?' + new URLSearchParams(
@@ -1172,7 +1186,11 @@
       });
     });
     reset.addEventListener('click', () => {
-      for (const f of rule.fields) form.elements[f.name].value = f.default;
+      for (const f of rule.fields) {
+        const el = form.elements[f.name];
+        if (f.type === 'boolean') el.checked = !!f.default;
+        else el.value = f.default;
+      }
       delete savedAll[rule.id];
       storage(s => s.setItem(RULES_KEY, JSON.stringify(savedAll)));
     });
@@ -1207,13 +1225,19 @@
         (res.days > 1 ? ` · 最近 ${res.days} 个交易日` : ' · 当日') }),
       h('span', { class: 'spacer' }),
       h('span', { class: 'muted small', text: '扫描于 ' + fmtTime(at) })));
+    const rg = res.regime || {};
+    const held = res.hits.filter(x => x.held).length;
+    box.append(h('p', { class: rg.state === 'bull' ? 'muted' : 'note', text:
+      `沪深300（${rg.date || '—'}）：${REGIME_WORD[rg.state] || '—'}` +
+      (p.month_up ? '。只列个股月线向上的。' : '。') +
+      (held ? `其中 ${held} 只的信号日大盘不在多头，按设置不推送。` : '') }));
     if (!res.hits.length) {
       box.append(h('p', { class: 'muted', text:
         '没有股票刚刚首次突破。可以把“首次突破在最近”放宽到 3–5 个交易日再看。' }));
     } else {
       box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
         h('thead', {}, h('tr', {},
-          h('th', { text: '股票' }), h('th', { text: '信号日' }),
+          h('th', { text: '股票' }), h('th', { text: '信号日' }), h('th', { text: '大盘' }),
           h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '均线' }),
           h('th', { class: 'r', text: '高出' }), h('th', { class: 'r', text: '横盘振幅' }),
           h('th', { class: 'r', text: '当日涨幅' }),
@@ -1229,9 +1253,12 @@
     }
     const lines = [];
     if (res.recorded) {
-      lines.push(res.recorded.note || (res.recorded.added === 0 ? '都已在信号记录里，没有新的。'
-        : `新记入信号记录 ${res.recorded.added} 只` +
-          (res.recorded.pushing ? '，正在推送。' : '；没有配置推送渠道，所以不推送。')));
+      const rc = res.recorded;
+      const sendable = rc.added - (rc.held || 0);
+      lines.push(rc.note || (rc.added === 0 ? '都已在信号记录里，没有新的。'
+        : `新记入信号记录 ${rc.added} 只` +
+          (rc.held ? `，其中 ${rc.held} 只因大盘不在多头不推送` : '') +
+          (sendable === 0 ? '。' : rc.pushing ? '；其余的正在推送。' : '；没有配置推送渠道，所以都不推送。')));
     }
     if (isNum(f.total)) {
       lines.push(`行情：本地 ${f.cached} 只，新抓 ${f.fetched} 只` +
@@ -1252,6 +1279,7 @@
         h('span', { class: 'code', text: r.code }),
         h('span', { class: 'sub', text: r.industry || '' })),
       h('td', { class: 'date', 'data-label': '信号日', text: r.date + (r.bars_ago > 0 ? `（${r.bars_ago} 天前）` : '') }),
+      h('td', { 'data-label': '大盘', text: (REGIME_WORD[r.regime] || '—') + (r.held ? '，不推送' : '') }),
       h('td', { class: 'r num', 'data-label': '收盘', text: fmtNum(r.close) }),
       h('td', { class: 'r num', 'data-label': '均线', text: fmtNum(r.ma) }),
       h('td', { class: 'r num', 'data-label': '高出', text: fmtPct(r.above) }),
@@ -1317,7 +1345,8 @@
       }
       box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
         h('thead', {}, h('tr', {},
-          h('th', { text: '股票' }), h('th', { text: '信号日' }), h('th', { text: '加入' }),
+          h('th', { text: '股票' }), h('th', { text: '信号日' }), h('th', { text: '大盘' }),
+          h('th', { text: '加入' }),
           h('th', { class: 'r', text: '信号日收盘' }), h('th', { class: 'r', text: '最新' }),
           h('th', { class: 'r', text: '信号日以来' }), h('th', { class: 'r', text: '加入以来' }),
           h('th', { class: 'r', text: 'ROE' }), h('th', { text: '' }))),
@@ -1339,6 +1368,7 @@
         h('span', { class: 'code', text: s.code }),
         h('span', { class: 'sub', text: s.industry || '' })),
       h('td', { class: 'date', 'data-label': '信号日', text: s.signal_date }),
+      h('td', { 'data-label': '大盘', text: (REGIME_WORD[s.regime] || '—') + (s.pushed === 'held' ? '，未推送' : '') }),
       h('td', { class: 'date', 'data-label': '加入', text: fmtTime(s.added_at) }),
       h('td', { class: 'r num', 'data-label': '信号日收盘', text: fmtNum(s.signal_close) }),
       h('td', { class: 'r num date', 'data-label': '最新' },

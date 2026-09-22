@@ -413,9 +413,15 @@ function g_exports.report_scan_markdown(r)
     local function f(...) line(string.format(...)) end
     local p = r.params or {}
 
-    f('# 信号扫描：横盘 %d 日（振幅 ≤ %s）后上穿 %d 日均线%s', p.flat_lookback or 0,
+    f('# 信号扫描：横盘 %d 日（振幅 ≤ %s）后上穿 %d 日均线%s%s', p.flat_lookback or 0,
         report_pct(p.flat_max, 0), p.ma_days or 0,
-        (p.above_pct or 0) > 0 and string.format('（高出 %s）', report_pct(p.above_pct, 1)) or '')
+        (p.above_pct or 0) > 0 and string.format('（高出 %s）', report_pct(p.above_pct, 1)) or '',
+        p.month_up and '，个股月线向上' or '')
+    line()
+    local rg = r.regime or {}
+    local WORD = { bull = '多头', bear = '空头', range = '震荡', unknown = '数据不足' }
+    f('沪深300（%s）：%s%s', rg.date or '—', WORD[rg.state] or '—',
+        (p.bull_only and rg.state ~= 'bull') and '——按设置，这些信号不推送' or '')
     line()
     f('范围：%s，看了 %d 只；%s%s',
         r.universe or '—', r.checked or 0,
@@ -427,11 +433,11 @@ function g_exports.report_scan_markdown(r)
     if #(r.hits or {}) == 0 then
         line('没有股票在发信号。')
     else
-        line('| 代码 | 名称 | 信号日 | 收盘 | 均线 | 高出 | 横盘振幅 | 当日涨幅 | 信号日以来 | PE | ROE |')
-        line('|---|---|---|---|---|---|---|---|---|---|---|')
+        line('| 代码 | 名称 | 信号日 | 大盘 | 收盘 | 均线 | 高出 | 横盘振幅 | 当日涨幅 | 信号日以来 | PE | ROE |')
+        line('|---|---|---|---|---|---|---|---|---|---|---|---|')
         for _, x in ipairs(r.hits) do
-            f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
-                x.date, num(x.close), num(x.ma), report_pct(x.above, 1),
+            f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
+                x.date, WORD[x.regime] or '—', num(x.close), num(x.ma), report_pct(x.above, 1),
                 report_pct(x.width, 1), report_pct(x.day_gain, 1), report_pct(x.since_pct, 1),
                 num(x.pe_ttm, 1), report_pct(x.roe, 1))
         end

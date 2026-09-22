@@ -135,6 +135,7 @@ function g_exports.strategy_collect(px, opts)
     local flats = opts.flat_max or axes.flat_max
     local d = backtest_breakout_params()
     local out = {}
+    local trend = backtest_month_trend(px)
     for _, n in ipairs(mas) do
         local ma = backtest_ma_series(px, n)
         for _, flat in ipairs(flats) do
@@ -143,6 +144,7 @@ function g_exports.strategy_collect(px, opts)
                     ma = ma, ma_days = n, flat_lookback = opts.flat_lookback or d.flat_lookback,
                     flat_max = flat, above_pct = above,
                     min_day_gain = opts.min_day_gain, cooldown = opts.cooldown,
+                    month_up = opts.month_up, month_trend = trend,
                 })
                 local rets = {}
                 for _, e in ipairs(found.entries) do
@@ -324,15 +326,17 @@ function g_exports.strategy_rules()
     return util_json_array({
         {
             id = 'breakout',
+            version = backtest_breakout_version,
             title = '突破横盘周线',
             summary = '股价横盘一段时间（这段时间的最高价和最低价相差不超过一定幅度），' ..
-                      '然后收盘上穿均线：从一个窄平台里走了出来。',
+                      '然后收盘上穿均线：从一个窄平台里走了出来；而且个股自己的月线向上。',
             -- What the backtest measured for the default numbers, which stays
             -- true whatever the config now says; the fields carry the values.
-            basis = '5 年回测（2021–2026 全市场，默认参数，持有 60 个交易日，和同一年随便哪天买比）：' ..
-                    '中位收益高 0.4 个百分点、胜率持平；5 年里 3 年为正，信号最多的 2025 年 −2.0；' ..
-                    '持有 20 天略跑输。比旧的「均线走平 + 高出 3%」（−1.6）好，但还不能说有优势，' ..
-                    '下面的信号记录是往后的检验。',
+            basis = '5 年回测（2021–2026 全市场，持有 60 个交易日，和同期随便哪天买比胜率）：' ..
+                    '只看横盘突破是 +0.2；加上个股月线向上是 +3.2，2021–23 年 +5.4、2024–26 年 +0.7，' ..
+                    '优势在变小，持有 120 天时不成立。沪深300 多头时的信号 +4.1，但这种日子只出现在 2024–26 年' ..
+                    '这一段。追周线强势（多头排列、创 26/52 周新高）两段都跑输 4–5.5。' ..
+                    '这些都还不能说是可靠的优势，下面的信号记录是往后的检验。',
             fields = util_json_array({
                 { name = 'ma_weeks', label = '均线', unit = '周', default = weeks(d.ma_days),
                   min = 1, max = 100, step = 1 },
@@ -344,6 +348,10 @@ function g_exports.strategy_rules()
                   min = 1, max = 50, step = 1 },
                 { name = 'min_day_gain', label = '当天至少涨', unit = '%', default = d.min_day_gain,
                   min = 0, max = 20, step = 0.5 },
+                { name = 'month_up', type = 'boolean', default = d.month_up,
+                  label = '个股月线向上（收盘在上升的 10 个月均线之上）' },
+                { name = 'bull_only', type = 'boolean', default = d.bull_only,
+                  label = '沪深300 不在多头时不推送（信号照常列出和记录）' },
                 { name = 'days', label = '首次突破在最近', unit = '个交易日内', default = 1,
                   min = 1, max = 20, step = 1 },
             }),
@@ -353,16 +361,16 @@ end
 
 -- COROUTINE-ONLY. Which stocks broke out just now.
 --
--- A signal is the FIRST day of a breakout, as in the backtest the rule's
--- numbers were fitted on: an entry, then nothing for `cooldown` trading days
--- however long the condition holds. Listing every day it holds instead would
--- put the stock that broke out a week ago, 40% above its average by now, at
--- the top of the list — a chase, and not what the fitted edge was measured on.
+-- A signal is the day the close crosses the line out of a base (see
+-- backtest_breakout), the same unit the backtest counts: a stock that crossed
+-- last week and has run 40% since is not breaking out today, and listing it
+-- would put a chase at the top of the list.
 --
 -- opts adds { days = 1 }: how many of the most recent bars count as "now", so
 -- a breakout from two days ago is still findable on a Wednesday morning, with
 -- how far it has gone since; { ma_weeks, flat_weeks }, the same two windows
--- said in weeks; { cooldown }, 1 for "every day the condition holds"; and
+-- said in weeks; { cooldown }, 1 to count a stock crossing back and forth
+-- every time it does; and
 -- { on_bars = fn(code, bars) }, called with each stock's bars as they are read,
 -- for a caller keeping its own prices current without reading them again.
 function g_exports.strategy_scan(opts)
@@ -381,6 +389,9 @@ function g_exports.strategy_scan(opts)
         flat_max = opts.flat_max or d.flat_max, flat_lookback = opts.flat_lookback or d.flat_lookback,
         min_day_gain = opts.min_day_gain or d.min_day_gain, cooldown = opts.cooldown or d.cooldown,
     }
+    -- Booleans, so `or` would turn an explicit false into the default.
+    if opts.month_up == nil then p.month_up = d.month_up else p.month_up = opts.month_up end
+    if opts.bull_only == nil then p.bull_only = d.bull_only else p.bull_only = opts.bull_only end
     -- The rule as configured, rather than a variation of it being tried out:
     -- only that is worth keeping a record of (engine/signals.lua).
     local configured = true
@@ -391,6 +402,28 @@ function g_exports.strategy_scan(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
 
     local fetch = prefetch(list, opts)
+
+    -- The market's state on each signal day, from the index the review reads
+    -- and by the review's own definition of 多头. A signal on a day that was
+    -- not 多头 is still listed, and kept in the record, but marked `held`:
+    -- only 2024-2026 had such days at all, and in them the rule beat buying any
+    -- stock on the same days by 4 points of win rate — one market episode, not
+    -- a law, so the day's state is shown rather than the stock hidden.
+    local regime_code = cfg_get('REVIEW_REGIME_INDEX', '000300')
+    local index = quote_series('idx:' .. regime_code, { offline = opts.offline })
+    local index_rows = index and type(index.rows) == 'table' and index.rows or {}
+    local regimes = {}
+    local function regime_on(date)
+        if regimes[date] then return regimes[date] end
+        local upto = {}
+        for _, r in ipairs(index_rows) do
+            if r.date > date then break end
+            upto[#upto + 1] = r
+        end
+        regimes[date] = review_regime(upto).state
+        return regimes[date]
+    end
+
     local hits, checked, skipped = {}, 0, {}
     for i, item in ipairs(list) do
         -- Five thousand stocks read from disk is ten seconds of work, and the
@@ -407,6 +440,7 @@ function g_exports.strategy_scan(opts)
             local found = backtest_breakout(px, {
                 ma_days = p.ma_days, flat_lookback = p.flat_lookback, flat_max = p.flat_max,
                 above_pct = p.above_pct, min_day_gain = p.min_day_gain, cooldown = p.cooldown,
+                month_up = p.month_up,
             })
             -- The newest signal per stock and no more. With a cooldown of one
             -- and a window of several days, the same breakout would otherwise
@@ -427,6 +461,8 @@ function g_exports.strategy_scan(opts)
                     day_gain = newest.day_gain,
                     bars_ago = #px - newest.index,
                     last_date = last.date, last_close = now,
+                    regime = regime_on(newest.date),
+                    month_ma10 = newest.month_ma10,
                     since_pct = (now and newest.close > 0) and (now / newest.close - 1) * 100 or nil,
                     pe_ttm = item.pe_ttm, pb = item.pb, roe = item.roe,
                     market_cap = item.market_cap,
@@ -445,8 +481,14 @@ function g_exports.strategy_scan(opts)
             hit.name = rec and rec.name or nil
         end
     end
+    for _, hit in ipairs(hits) do
+        if p.bull_only and hit.regime ~= 'bull' then hit.held = true end
+    end
+    local last_index = index_rows[#index_rows]
     p.ma_weeks, p.flat_weeks = weeks(p.ma_days), weeks(p.flat_lookback)
     return {
+        regime = { index = regime_code, date = last_index and last_index.date,
+                   state = last_index and regime_on(last_index.date) or 'unknown' },
         universe = kind, checked = checked, days = days, fetch = fetch,
         params = p, configured = configured,
         hits = util_json_array(hits), skipped = util_json_array(skipped),
@@ -546,6 +588,7 @@ function g_exports.strategy_attribute(opts)
                 flat_max = opts.flat_max or d.flat_max,
                 above_pct = opts.above_pct or d.above_pct,
                 min_day_gain = opts.min_day_gain, cooldown = opts.cooldown,
+                month_up = opts.month_up,
             })
             for _, k in ipairs(kinds) do
                 local value = g[k]
