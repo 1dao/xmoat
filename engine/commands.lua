@@ -867,6 +867,116 @@ local function install_strategy()
         handler = function() return strategy_rules() end,
     })
 
+    -- The universe/screen params, without breakout's own knobs: shared by the
+    -- two subnew commands only (strategy_params above is breakout-shaped).
+    local function subnew_universe_params()
+        return {
+            codes = { type = 'string', doc = '股票代码，逗号分隔；给了就用它，不看 universe' },
+            universe = { type = 'string', enum = { 'watchlist', 'screen', 'market' },
+                         doc = '默认 watchlist；screen 按下面的条件筛；market 是全市场每一只' },
+            limit = { type = 'integer', doc = '最多看多少只，默认 30；universe=market 时可到 6000（全市场）' },
+            bars_days = { type = 'integer', doc = '每只股票抓多少个交易日，默认按 QUOTE_MAX_DAYS' },
+            force = { type = 'boolean', doc = '忽略缓存，重新抓一遍' },
+            workers = { type = 'integer', doc = '并发连接数，默认 TDX_CONNECTIONS' },
+            roe_min = { type = 'number', doc = 'universe=screen 时的筛选条件' },
+            pe_max = { type = 'number' }, pb_max = { type = 'number' },
+            cap_min = { type = 'number', doc = '总市值下限（亿元）' },
+            industry = { type = 'string' },
+            include_st = { type = 'boolean' },
+            offline = { type = 'boolean', doc = '只用本地行情缓存，不联网' },
+            price_source = { type = 'string', enum = { 'tdx', 'em' },
+                             doc = '行情来源，默认 tdx（通达信协议，可并发）' },
+        }
+    end
+
+    -- codes / screen filters for the two subnew commands.
+    local function subnew_common(p)
+        local codes
+        if p.codes then
+            codes = {}
+            for c in tostring(p.codes):gmatch('[^,%s]+') do codes[#codes + 1] = c end
+            if #codes == 0 then codes = nil end
+        end
+        return {
+            codes = codes, universe = p.universe, limit = p.limit,
+            price_source = p.price_source, bars_days = p.bars_days,
+            filters = { roe_min = p.roe_min, pe_max = p.pe_max, pb_max = p.pb_max,
+                        cap_min = p.cap_min, industry = p.industry, include_st = p.include_st,
+                        sort = 'roe', order = 'desc' },
+            offline = p.offline,
+        }
+    end
+
+    api_define({
+        name = 'subnew.scan', method = 'GET', path = '/api/v1/subnew/scan',
+        summary = '扫描次新股：上市一年内、相对首日开盘价跌了 drop% 以上的股票',
+        params = (function()
+            local p = subnew_universe_params()
+            p.list_window = { type = 'integer', doc = '上市多少个交易日以内算次新股，默认 SUBNEW_LIST_WINDOW（240，约一年）' }
+            p.drop = { type = 'number', doc = '相对首日开盘价至少跌多少 %，默认 SUBNEW_DROP_PCT（50）' }
+            return p
+        end)(),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.bars_days and (p.bars_days < 60 or p.bars_days > 5000) then
+                return nil, 'bad_request', 'bars_days 应在 60 到 5000 之间'
+            end
+            if p.list_window and (p.list_window < 20 or p.list_window > 1200) then
+                return nil, 'bad_request', 'list_window 应在 20 到 1200 之间'
+            end
+            if p.drop and (p.drop < 1 or p.drop > 99) then
+                return nil, 'bad_request', 'drop 应在 1 到 99 之间'
+            end
+            local opts = subnew_common(p)
+            opts.list_window, opts.drop_pct = p.list_window, p.drop
+            local res, ecode, emsg = subnew_scan(opts)
+            if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
+            return res
+        end,
+    })
+
+    api_define({
+        name = 'subnew.backtest', method = 'GET', path = '/api/v1/subnew/backtest',
+        summary = '次新股规则的胜率：全市场网格回测（上市天数 × 跌幅），和同期"买次新股"的基准比',
+        params = (function()
+            local p = subnew_universe_params()
+            p.list_window = { type = 'string', doc = '上市天数窗口，逗号分隔，默认 120,180,240,300' }
+            p.drop = { type = 'string', doc = '跌幅门槛 %，逗号分隔，默认 30,40,50,60' }
+            p.horizon = { type = 'integer', doc = '按持有多少个交易日算胜率，默认 60' }
+            p.cooldown = { type = 'integer', doc = '两次触发之间最少隔几个交易日，默认 SUBNEW_COOLDOWN（60）' }
+            p.take_profit = { type = 'number', doc = '止盈 %，默认 20' }
+            p.stop_loss = { type = 'number', doc = '止损 %，默认 10' }
+            p.objective = { type = 'string', enum = { 'median', 'avg', 'win_rate' }, doc = '排名依据，默认 median' }
+            p.min_entries = { type = 'integer', doc = '一格至少触发多少次才参与排名，默认 10' }
+            return p
+        end)(),
+        handler = function(p)
+            if p.limit and (p.limit < 1 or p.limit > 6000) then
+                return nil, 'bad_request', 'limit 应在 1 到 6000 之间'
+            end
+            if p.bars_days and (p.bars_days < 60 or p.bars_days > 5000) then
+                return nil, 'bad_request', 'bars_days 应在 60 到 5000 之间'
+            end
+            if p.horizon and (p.horizon < 5 or p.horizon > 500) then
+                return nil, 'bad_request', 'horizon 应在 5 到 500 之间'
+            end
+            local windows, werr = number_list(p.list_window, 'list_window', 20, 1200)
+            if werr then return nil, 'bad_request', werr end
+            local drops, derr = number_list(p.drop, 'drop', 1, 99)
+            if derr then return nil, 'bad_request', derr end
+            local opts = subnew_common(p)
+            opts.list_window, opts.drop_pct = windows, drops
+            opts.horizon, opts.cooldown = p.horizon, p.cooldown
+            opts.take_profit, opts.stop_loss = p.take_profit, p.stop_loss
+            opts.objective, opts.min_entries = p.objective, p.min_entries
+            local res, ecode, emsg = subnew_backtest(opts)
+            if not res then return nil, ecode or 'internal', emsg or '网格回测失败' end
+            return res
+        end,
+    })
+
     api_define({
         name = 'signals.list', method = 'GET', path = '/api/v1/signals',
         summary = '内置规则的信号记录：每只首日突破的发现时间、价格，以及之后涨了多少',

@@ -145,9 +145,13 @@
     const token = ++renderToken;
     if (activeChart) { activeChart.destroy(); activeChart = null; }
     const m = location.hash.match(/^#\/stock\/([0-9A-Za-z.]+)$/);
+    // #/screen/rules/N is the Nth built-in rule's own tab; a bare
+    // #/screen/rules (an old link, or a mistyped one) falls back to the
+    // first one rather than 404ing.
+    const rm = location.hash.match(/^#\/screen\/rules(?:\/(\d+))?$/);
     const page = m ? 'stock'
       : location.hash === '#/alerts' ? 'alerts'
-      : location.hash === '#/screen' || location.hash === '#/screen/rules' ? 'screen'
+      : location.hash === '#/screen' || rm ? 'screen'
       : location.hash === '#/review' ? 'review'
       : 'watchlist';
     for (const link of document.querySelectorAll('[data-nav]')) {
@@ -156,7 +160,10 @@
     }
     if (m) return renderStock(m[1], token);
     if (page === 'alerts') return renderAlerts(token);
-    if (page === 'screen') return renderScreen(token, location.hash === '#/screen/rules' ? 'rules' : 'custom');
+    if (page === 'screen') {
+      const tab = rm ? (BUILTIN_TABS[(Number(rm[1]) || 1) - 1] || BUILTIN_TABS[0]).id : 'custom';
+      return renderScreen(token, tab);
+    }
     if (page === 'review') return renderReview(token);
     return renderWatchlist(token);
   }
@@ -961,11 +968,23 @@
   }
 
   // Two ways to narrow the market: conditions on the snapshot the user sets
-  // (定制规则), and the rules the engine ships with their fitted numbers
-  // (内置规则). Each has its own address, so a reload stays on the same one.
+  // (定制规则), and the rules the engine ships with their fitted numbers, each
+  // its OWN tab — 内置规则1, 内置规则2, … — rather than one tab holding every
+  // rule stacked. Order here is what the numbering means: append a new rule
+  // at the end to add 内置规则3, or reorder this list to renumber the ones
+  // that exist. `render` gets the token, the fetched strategy.rules() array
+  // (only breakout needs it) and this rule's own number for its heading.
+  const BUILTIN_TABS = [
+    { id: 'subnew', render: (token, rules, n) => subnewCard(token, n) },
+    { id: 'breakout', render: (token, rules, n) => ruleCard(rules.find(r => r.id === 'breakout'), token, n) },
+  ];
+
+  // Each has its own address, so a reload stays on the same one.
   function screenTabs(tab) {
     const group = h('div', { class: 'seg screen-tabs', role: 'group', 'aria-label': '筛选方式' });
-    for (const [value, label, hash] of [['custom', '定制规则', '#/screen'], ['rules', '内置规则', '#/screen/rules']]) {
+    const items = [['custom', '定制规则', '#/screen'],
+      ...BUILTIN_TABS.map((t, i) => [t.id, `内置规则${i + 1}`, `#/screen/rules/${i + 1}`])];
+    for (const [value, label, hash] of items) {
       group.append(h('button', { type: 'button', text: label, 'aria-pressed': String(tab === value),
         onclick: () => { if (location.hash !== hash) location.hash = hash; } }));
     }
@@ -973,13 +992,15 @@
   }
 
   async function renderScreen(token, tab) {
-    document.title = (tab === 'rules' ? '内置规则' : '筛选') + ' · xmoat';
+    const entry = BUILTIN_TABS.find(t => t.id === tab);
+    const number = entry ? BUILTIN_TABS.indexOf(entry) + 1 : null;
+    document.title = (entry ? `内置规则${number}` : '筛选') + ' · xmoat';
     setView(loading());
     let status, rules;
     try {
       [status, rules] = await Promise.all([
         api('GET', '/api/v1/market'),
-        tab === 'rules' ? api('GET', '/api/v1/strategy/rules') : null,
+        entry ? api('GET', '/api/v1/strategy/rules') : null,
       ]);
     } catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
     if (stale(token)) return;
@@ -1010,8 +1031,8 @@
       return;
     }
 
-    if (tab === 'rules') {
-      setView(head, screenTabs(tab), rules.flatMap(rule => ruleCard(rule, token)));
+    if (entry) {
+      setView(head, screenTabs(tab), entry.render(token, rules, number));
       return;
     }
 
@@ -1126,7 +1147,12 @@
   // A gain reads as a change, so it carries its sign.
   const fmtGain = v => (isNum(v) ? (v > 0 ? '+' : '') + fmtPct(v) : '—');
 
-  function ruleCard(rule, token) {
+  // `number` is this rule's position in the combined list of built-in rules
+  // (server-defined ones first, then the client-only ones below) — shown in
+  // the heading so a reader can tell them apart, and so a new rule added
+  // later is just one more entry appended after the existing ones, not a
+  // renumbering.
+  function ruleCard(rule, token, number) {
     const savedAll = (() => {
       try { return JSON.parse(storage(s => s.getItem(RULES_KEY)) || '{}'); } catch (e) { return {}; }
     })();
@@ -1197,7 +1223,7 @@
 
     return [
       h('section', { class: 'card' },
-        h('div', { class: 'card-head' }, h('h2', { text: rule.title })),
+        h('div', { class: 'card-head' }, h('h2', { text: `内置规则${number}：${rule.title}` })),
         h('p', { text: rule.summary }),
         form,
         h('p', { class: 'muted small mt', text: rule.basis })),
@@ -1290,6 +1316,188 @@
       h('td', { class: 'r num', 'data-label': 'PE(TTM)', text: fmtNum(r.pe_ttm, 1) }),
       h('td', { class: 'r num', 'data-label': 'ROE', text: fmtPct(r.roe) }),
       h('td', { class: 'r col-actions' }, watchButton(r)));
+  }
+
+  // ── 次新股: recently listed, down from its first day ─────────────────────────
+  //
+  // Structurally its own thing, not a breakout variant: no均线/横盘 fields, no
+  // signal record, no daily push. Its own card, its own scan, and — because
+  // "how many weeks, how big a drop" is exactly the question a grid answers —
+  // its own backtest, right here rather than only through the API.
+
+  const SUBNEW_KEY = 'xmoat.subnew';
+
+  function subnewCard(token, number) {
+    const saved = (() => {
+      try { return JSON.parse(storage(s => s.getItem(SUBNEW_KEY)) || '{}'); } catch (e) { return {}; }
+    })();
+    const DEFAULTS = { list_weeks: 60, drop: 60 };
+
+    const form = h('form', { class: 'screen-form' },
+      h('label', { class: 'field' }, h('span', { text: '上市多少周以内算次新股' }),
+        h('input', { type: 'number', step: 'any', name: 'list_weeks', min: 4, max: 240,
+          required: true, value: saved.list_weeks ?? DEFAULTS.list_weeks })),
+      h('label', { class: 'field' }, h('span', { text: '相对首日开盘价至少跌（%）' }),
+        h('input', { type: 'number', step: 'any', name: 'drop', min: 1, max: 99,
+          required: true, value: saved.drop ?? DEFAULTS.drop })));
+    const run = h('button', { class: 'btn btn-primary', type: 'submit', text: '筛选全市场' });
+    const reset = h('button', { class: 'btn btn-quiet', type: 'button', text: '恢复默认' });
+    form.append(h('div', { class: 'field field-actions' }, run, reset,
+      h('span', { class: 'muted small', text:
+        '第一次会用通达信把全市场的日线抓到本地，要一两分钟；之后只补新的几天，十几秒。' })));
+
+    const results = h('section', { class: 'card' });
+    results.append(h('p', { class: 'muted', text:
+      '点“筛选全市场”，在全部 A 股里找上市不久、相对首日开盘价已经跌了这么多的股票。' }));
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const list_weeks = Number(form.elements.list_weeks.value);
+      const drop = Number(form.elements.drop.value);
+      storage(s => s.setItem(SUBNEW_KEY, JSON.stringify({ list_weeks, drop })));
+      await busy(run, '全市场扫描中…', async () => {
+        const res = await api('GET', '/api/v1/subnew/scan?' + new URLSearchParams({
+          universe: 'market', limit: '6000',
+          list_window: String(Math.round(list_weeks * 5)), drop: String(drop),
+        }).toString());
+        if (stale(token)) return;
+        showSubnewScan(results, res);
+      });
+    });
+    reset.addEventListener('click', () => {
+      form.elements.list_weeks.value = DEFAULTS.list_weeks;
+      form.elements.drop.value = DEFAULTS.drop;
+      storage(s => s.removeItem(SUBNEW_KEY));
+    });
+
+    return [
+      h('section', { class: 'card' },
+        h('div', { class: 'card-head' }, h('h2', { text: `内置规则${number}：次新股，跌破首日开盘价` })),
+        h('p', { text: '上市不久、股价已经把上市炒作的热度还回去了的股票。' }),
+        form,
+        h('p', { class: 'muted small mt', text:
+          '还没有在全市场上定过“够可靠”的窗口和跌幅——用下面的回测网格自己查一遍，和' +
+          '“买同一批次新股但不要求它跌”的基准比；胜率没有明显更高，就说明这个跌幅条件没加东西。' })),
+      results,
+      subnewBacktestCard(),
+    ];
+  }
+
+  const SUBNEW_ROWS = 300;
+
+  function showSubnewScan(box, res) {
+    box.textContent = '';
+    const p = res.params || {};
+    const f = res.fetch || {};
+    box.append(h('div', { class: 'card-head' },
+      h('h2', { text: `${res.hits.length} 只次新股` }),
+      h('span', { class: 'muted', text:
+        `看了 ${res.checked} 只 · 上市 ${fmtCount(p.list_weeks)} 周以内 · ` +
+        `相对首日开盘价跌 ${fmtPct(p.drop_pct, 0)} 以上` })));
+    if (!res.hits.length) {
+      box.append(h('p', { class: 'muted', text: '没有符合条件的股票。可以把跌幅门槛调低一些再看。' }));
+    } else {
+      box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
+        h('thead', {}, h('tr', {},
+          h('th', { text: '股票' }), h('th', { text: '上市日' }),
+          h('th', { class: 'r', text: '上市交易日' }), h('th', { class: 'r', text: '首日开盘' }),
+          h('th', { class: 'r', text: '最新收盘' }), h('th', { class: 'r', text: '跌幅' }),
+          h('th', { class: 'r', text: '最低点跌幅' }), h('th', { class: 'r', text: '市值' }),
+          h('th', { class: 'r', text: 'PE(TTM)' }), h('th', { class: 'r', text: 'ROE' }),
+          h('th', { text: '' }))),
+        h('tbody', {}, res.hits.slice(0, SUBNEW_ROWS).map(subnewRow)))));
+      if (res.hits.length > SUBNEW_ROWS) {
+        box.append(h('p', { class: 'muted small', text:
+          `只列出前 ${SUBNEW_ROWS} 只（跌得最多的在前）。` }));
+      }
+    }
+    const lines = [];
+    if (isNum(f.total)) {
+      lines.push(`行情：本地 ${f.cached} 只，新抓 ${f.fetched} 只` +
+        (f.failed && f.failed.length ? `，失败 ${f.failed.length} 只` : '') +
+        (isNum(f.ms) ? `，用时 ${fmtNum(f.ms / 1000, 1)} 秒` : '') + '。');
+    }
+    if (res.skipped && res.skipped.length) {
+      lines.push(`跳过 ${res.skipped.length} 只：没有行情，或日线是被截断的老股票，首日开盘价无从谈起。`);
+    }
+    if (res.note) lines.push(res.note);
+    for (const line of lines) box.append(h('p', { class: 'muted small', text: line }));
+  }
+
+  function subnewRow(r) {
+    const open = () => { location.hash = '#/stock/' + r.code; };
+    return h('tr', { onclick: open, tabindex: '0', onkeydown: e => { if (e.key === 'Enter') open(); } },
+      h('td', { class: 'col-name' }, h('span', { class: 'name', text: r.name || r.code }), ' ',
+        h('span', { class: 'code', text: r.code }),
+        h('span', { class: 'sub', text: r.industry || '' })),
+      h('td', { 'data-label': '上市日', text: r.list_date }),
+      h('td', { class: 'r num', 'data-label': '上市交易日', text: fmtNum(r.days_listed, 0) }),
+      h('td', { class: 'r num', 'data-label': '首日开盘', text: fmtNum(r.first_open) }),
+      h('td', { class: 'r num', 'data-label': '最新收盘', text: fmtNum(r.last_close) }),
+      h('td', { class: 'r num', 'data-label': '跌幅', text: fmtGain(r.drop_pct) }),
+      h('td', { class: 'r num', 'data-label': '最低点跌幅', text: fmtGain(r.low_pct) }),
+      h('td', { class: 'r num', 'data-label': '市值', text: fmtMoney(r.market_cap) }),
+      h('td', { class: 'r num', 'data-label': 'PE(TTM)', text: fmtNum(r.pe_ttm, 1) }),
+      h('td', { class: 'r num', 'data-label': 'ROE', text: fmtPct(r.roe) }),
+      h('td', { class: 'r col-actions' }, watchButton(r)));
+  }
+
+  // The grid backtest: how "上市天数 × 跌幅" would have done, pooled across
+  // the whole market, against buying the same young stocks on any day.
+  function subnewBacktestCard() {
+    const box = h('section', { class: 'card' });
+    const run = h('button', { class: 'btn', type: 'button', text: '运行回测' });
+    const out = h('div');
+    box.append(
+      h('div', { class: 'card-head' }, h('h2', { text: '回测胜率' })),
+      h('p', { class: 'muted', text:
+        '在全市场次新股的历史上，把“上市多久”和“跌了多少”各扫几档，逐格统计持有一段时间后的胜率，' +
+        '和同一批次新股随便哪天买比。第一次要先把全市场日线抓一遍，跟上面筛选共用缓存。' }),
+      h('div', { class: 'field-actions' }, run),
+      out);
+    run.addEventListener('click', () => busy(run, '回测中…', async () => {
+      const res = await api('GET', '/api/v1/subnew/backtest?' + new URLSearchParams({
+        universe: 'market', limit: '6000',
+      }).toString());
+      showSubnewBacktest(out, res);
+    }));
+    return box;
+  }
+
+  function showSubnewBacktest(box, res) {
+    box.textContent = '';
+    box.append(h('p', { class: 'muted small', text:
+      `${res.stocks} 只完整历史的次新股参与回测` +
+      (res.truncated ? `，另有 ${res.truncated} 只上市已久、日线被截断，首日开盘价无从谈起，已排除` : '') +
+      (res.span ? `；日线中位 ${res.span.median_days} 天，多数从 ${res.span.typical_from} 起（最早 ${res.span.earliest_from}）`
+                : '') + '。' }));
+    const grid = res.grid || [];
+    if (!grid.length) {
+      box.append(h('p', { class: 'muted', text: '没有足够的次新股历史可以回测——先在上面筛选一次，把日线抓到本地。' }));
+    } else {
+      box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'watch-table' },
+        h('thead', {}, h('tr', {},
+          h('th', { text: '上市窗口' }), h('th', { text: '跌幅门槛' }),
+          h('th', { class: 'r', text: '触发次数' }), h('th', { class: 'r', text: '涉及股票' }),
+          h('th', { class: 'r', text: '胜率' }), h('th', { class: 'r', text: '中位收益' }),
+          h('th', { class: 'r', text: '平均收益' }), h('th', { class: 'r', text: '最差一笔' }),
+          h('th', { class: 'r', text: '止盈/止损胜率' }))),
+        h('tbody', {}, grid.map(row => h('tr', {},
+          h('td', { text: fmtCount(row.list_weeks) + ' 周' }),
+          h('td', { text: fmtPct(row.drop_pct, 0) }),
+          h('td', { class: 'r num', text: fmtNum(row.entries, 0) }),
+          h('td', { class: 'r num', text: fmtNum(row.stocks, 0) }),
+          h('td', { class: 'r num', text: fmtPct(row.win_rate) }),
+          h('td', { class: 'r num', text: fmtGain(row.median) }),
+          h('td', { class: 'r num', text: fmtGain(row.avg) }),
+          h('td', { class: 'r num', text: fmtGain(row.worst) }),
+          h('td', { class: 'r num', text: fmtPct(row.barrier_win_rate) })))))));
+    }
+    const bl = res.baseline || {};
+    box.append(h('p', { class: 'muted small', text:
+      `基准——同一批次新股，随便哪天买，持有 ${res.horizon} 个交易日：` +
+      `胜率 ${fmtPct(bl.win_rate)}、中位收益 ${fmtGain(bl.median)}、样本 ${fmtNum(bl.n, 0)}。` }));
+    for (const line of res.notes || []) box.append(h('p', { class: 'muted small', text: line }));
   }
 
   // What the rule found on earlier days, and what became of it. Kept by the

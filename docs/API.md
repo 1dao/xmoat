@@ -72,6 +72,8 @@
 | `groups.regions` | `GET /api/v1/groups/regions` | `refresh?`，`offline?` | 地域归属（31 个地域板块，约 5500 只），缓存 30 天 |
 | `strategy.scan` | `GET /api/v1/strategy/scan` | `rule?`，`ma_days?` 或 `ma_weeks?`，`flat_lookback?` 或 `flat_weeks?`，`above_pct?`，`flat_max?`，`days?`，`cooldown?`，`record?`，`codes?` / `universe?` / `limit?` | `Scan`：最近 `days` 个交易日里首次突破的股票 |
 | `strategy.rules` | `GET /api/v1/strategy/rules` | — | `Rule[]`：内置规则及其参数，默认值来自配置 |
+| `subnew.scan` | `GET /api/v1/subnew/scan` | `list_window?`，`drop?`，`codes?` / `universe?` / `limit?` | `SubnewScan`：上市 `list_window` 个交易日内、相对首日开盘价跌了 `drop%` 以上的股票 |
+| `subnew.backtest` | `GET /api/v1/subnew/backtest` | `list_window?`（逗号分隔），`drop?`（逗号分隔），`horizon?`，`cooldown?`，`objective?`，`min_entries?`，`codes?` / `universe?` / `limit?` | `Sweep`：网格回测（上市天数 × 跌幅），和"买同一批次新股但不要求它跌"的基准比 |
 | `signals.list` | `GET /api/v1/signals` | `days?`（默认 30，按信号日），`limit?`（默认 500） | `SignalList`：内置规则的信号记录与之后的涨幅 |
 | `signals.run` | `POST /api/v1/signals/run` | — | 按默认参数把全市场跑一遍、记下新发现的并推送；收盘后的检查也做这件事 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
@@ -376,8 +378,8 @@ type SweepRow = {
 
 type Sweep = {
   code?: string, name?: string,             // 单只股票时
-  universe?: 'codes' | 'screen' | 'watchlist', stocks?: number,   // 多只股票时
-  signal: 'breakout', signal_note: string,
+  universe?: 'codes' | 'screen' | 'watchlist' | 'market', stocks?: number,   // 多只股票时
+  signal: 'breakout' | 'subnew', signal_note?: string,
   from?: string, to?: string, days?: number, // 多只股票时 from 是最早那只的起始日，别当成样本长度
   span?: {                                  // 多只股票时：一只典型的股票贡献了多长的日线
     median_days: number,                    // 每只日线天数的中位数
@@ -385,12 +387,13 @@ type Sweep = {
     earliest_from: string, to: string,
   },
   horizon: number, objective: 'median' | 'avg' | 'win_rate',
-  flat_lookback: number, min_day_gain: number, cooldown: number,
+  flat_lookback?: number, min_day_gain?: number, cooldown: number,   // subnew.backtest 只有 cooldown
+  truncated?: number,                       // subnew.backtest 独有：日线被 QUOTE_MAX_DAYS 截断、排除在外的只数
   require_: { min_entries: number, min_win_rate?: number, max_worst?: number, max_sl?: number },
-  grid: SweepRow[],                         // 整张表，按参数排序
+  grid: SweepRow[],                         // 整张表，按参数排序（subnew.backtest 的行是 list_window × drop_pct）
   ranked: SweepRow[],                       // 满足约束的前 10 名
   best?: SweepRow,
-  neighbours?: { n: number, mean?: number, worst?: number, cells: SweepRow[] },
+  neighbours?: { n: number, mean?: number, worst?: number, cells: SweepRow[] },   // subnew.backtest 没有
   baseline: { n: number, win_rate?: number, avg?: number, median?: number, worst?: number },
   fetch?: { total: number, cached: number, fetched: number, ms?: number, failed: {code, error}[] },
   notes: string[],
@@ -452,6 +455,28 @@ type Scan = {
 
 `fetch` 里，已经够新的缓存不论是哪个来源填的都算「本地」：扫描用通达信，
 也不会把自选股那份带换手率的东方财富日线换掉。
+
+```ts
+type SubnewScan = {
+  universe: string, checked: number,
+  params: { list_window: number, drop_pct: number, list_weeks: number },
+  hits: {
+    code: string, name?: string, industry?: string,
+    list_date: string, last_date: string, days_listed: number,  // 上市以来的交易日数
+    first_open: number,                     // 首日开盘价（前复权）
+    last_close: number, line: number,       // 最新收盘，和跌幅门槛对应的价格
+    drop_pct: number,                       // 相对首日开盘价，负数
+    low_pct?: number,                       // 上市以来最低价相对首日开盘价，负数
+    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+  }[],                                      // 跌得最多的在前
+  skipped: { code: string, reason: string }[],
+  fetch?: { total: number, cached: number, fetched: number, ms?: number, failed: {code, error}[] },
+  note: string,
+}
+```
+
+`subnew.scan` 只看还没被 `QUOTE_MAX_DAYS` 截断的日线：一只上市已久的股票，缓存里第一天
+不是它的上市日，这样的股票被跳过，不算在 `hits` 或 `skipped` 里，只出现在 `checked` 的计数里。
 
 ```ts
 type SignalList = {

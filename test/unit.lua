@@ -1700,6 +1700,141 @@ local function test_breakout()
     __net_set_transport(nil)
 end
 
+-- Bars for a stock listed on day 1: flat at 100 until `changes` overrides the
+-- close from some day onward (and it stays there, like a real step down/up),
+-- open equal to close except day 1's, which is always 100 — the reference
+-- price every signal here is measured against.
+-- changes = { { from = i, close = c }, ... }
+local function subnew_bars(n, changes)
+    local rows, cur = {}, 100
+    for i = 1, n do
+        for _, ch in ipairs(changes or {}) do
+            if ch.from == i then cur = ch.close end
+        end
+        rows[i] = { date = util_date_add_days('2024-01-01', i), open = i == 1 and 100 or cur,
+                    close = cur, high = cur + 1, low = cur - 1 }
+    end
+    return rows
+end
+
+local function test_subnew()
+    section('次新股: recently listed, down from its first day')
+
+    -- A cross under half the first day's open, on day 30.
+    local px = subnew_bars(260, { { from = 30, close = 45 } })
+    local found = subnew_signals(px, { list_window = 240, drop_pct = 50, cooldown = 60 })
+    eq('a close at or under half the first day\'s open fires', #found.entries, 1)
+    local e = found.entries[1]
+    eq('on the day it first crosses', e.date, px[30].date)
+    eq('its age is trading days since the listing day', e.age, 29)
+    near('and how far under the first open it closed', e.drop_pct, -55, 1e-9)
+    near('the line is half the first day\'s open', found.line, 50, 1e-9)
+
+    eq('a close only just above the line does not fire',
+        #subnew_signals(subnew_bars(260, { { from = 30, close = 51 } }),
+            { list_window = 240, drop_pct = 50 }).entries, 0)
+
+    -- Crossing the line, back over it, and under it again — inside the
+    -- cooldown that is one entry, not several.
+    local wobble = subnew_bars(260, { { from = 30, close = 45 }, { from = 31, close = 55 },
+                                      { from = 32, close = 44 } })
+    eq('a wobble across the line within cooldown counts once',
+        #subnew_signals(wobble, { list_window = 240, drop_pct = 50, cooldown = 60 }).entries, 1)
+    eq('but past the cooldown a fresh cross counts again',
+        #subnew_signals(wobble, { list_window = 240, drop_pct = 50, cooldown = 1 }).entries, 2)
+
+    -- Past the listing window, a fall is not a 次新股 signal any more.
+    eq('a drop after the window has passed is not tested',
+        #subnew_signals(subnew_bars(260, { { from = 250, close = 40 } }),
+            { list_window = 240, drop_pct = 50 }).entries, 0)
+
+    local no_open = subnew_bars(5, {})
+    no_open[1].open = nil
+    eq('no first-day open at all finds nothing', #subnew_signals(no_open, {}).entries, 0)
+
+    section('次新股: the state right now')
+    local now_down = subnew_bars(50, { { from = 50, close = 40 } })
+    local st = subnew_state(now_down, { list_window = 240, drop_pct = 50 })
+    check('a young, sufficiently fallen stock has a state', st ~= nil)
+    eq('its age in trading days', st.days_listed, 49)
+    eq('the first day\'s open', st.first_open, 100)
+    eq('today\'s close', st.last_close, 40)
+    near('the line', st.line, 50, 1e-9)
+    near('the drop from the first open', st.drop_pct, -60, 1e-9)
+    eq('the listing date', st.list_date, now_down[1].date)
+    eq('the latest date', st.last_date, now_down[#now_down].date)
+
+    eq('not fallen enough is not a hit',
+        subnew_state(subnew_bars(50, { { from = 50, close = 60 } }), { list_window = 240, drop_pct = 50 }), nil)
+    eq('too long listed is not a hit, even if it once fell that far',
+        subnew_state(subnew_bars(300, { { from = 50, close = 30 } }), { list_window = 240, drop_pct = 50 }), nil)
+
+    -- A series that reaches the fetch cap is a truncated window, not a
+    -- listing: its first bar is not the IPO day, so nothing is said about it.
+    local cap = cfg_int('QUOTE_MAX_DAYS', 1200)
+    eq('a full-length cache is a truncated window, not a fresh listing',
+        subnew_state(subnew_bars(cap, { { from = 50, close = 40 } }), { list_window = 240, drop_pct = 50 }), nil)
+    eq('no first-day open at all is not a hit either',
+        subnew_state({ { date = 'd1', close = 40 } }, {}), nil)
+
+    section('subnew.scan / subnew.backtest')
+    -- 600001: listed long enough ago that its cache is a truncated window —
+    -- not a 次新股 series, whatever its price did. 300002: genuinely young and
+    -- down past the line. 300003: genuinely young, never down.
+    local long = subnew_bars(cap, { { from = 50, close = 40 } })
+    local down = subnew_bars(80, { { from = 70, close = 30 } })
+    local flat = subnew_bars(80, {})
+    store_save('market', { version = 1, trade_date = '2026-09-18', rows = util_json_array({
+        { code = '600001', name = '老树科技' },
+        { code = '300002', name = '新芽软件' },
+        { code = '300003', name = '新苗生物' },
+    }) })
+    market_load()
+    local function seed_quote(code, rows, source)
+        store_save('quote:' .. code, { version = 1, code = code, kind = 'stock', adjust = 'qfq',
+            source = source or 'tdx', fetched_at = util_now_iso(),
+            first_date = rows[1].date, last_date = rows[#rows].date, rows = util_json_array(rows) })
+    end
+    seed_quote('600001', long)
+    seed_quote('300002', down)
+    seed_quote('300003', flat)
+
+    local scan = api_call('subnew.scan', { universe = 'market', limit = 6000, offline = true })
+    check('the scan runs off the cache', scan.ok, scan.error and scan.error.message)
+    eq('every cached stock is checked', scan.ok and scan.data.checked, 3)
+    eq('only the genuinely young, sufficiently fallen stock is found',
+        scan.ok and #scan.data.hits, 1)
+    local hit = scan.ok and scan.data.hits[1]
+    eq('it is the one that fell', hit and hit.code, '300002')
+    eq('with its name filled in from the snapshot', hit and hit.name, '新芽软件')
+    near('and how far under the first open it is', hit and hit.drop_pct, -70, 1e-9)
+    eq('list_window in trading days becomes weeks for the reader',
+        scan.ok and scan.data.params.list_weeks, subnew_params().list_window / 5)
+
+    eq('a listing window outside range is refused',
+        api_call('subnew.scan', { universe = 'market', list_window = 5 }).error.code, 'bad_request')
+    eq('a drop outside range is refused',
+        api_call('subnew.scan', { universe = 'market', drop = 0 }).error.code, 'bad_request')
+
+    local bt = api_call('subnew.backtest', { universe = 'market', limit = 6000, offline = true,
+        list_window = '120,240', drop = '50', horizon = 5, min_entries = 1, cooldown = 60 })
+    check('the grid backtest runs off the cache', bt.ok, bt.error and bt.error.message)
+    eq('the old, truncated cache is excluded, not mistaken for a listing',
+        bt.ok and bt.data.truncated, 1)
+    eq('the two genuinely young stocks are used', bt.ok and bt.data.stocks, 2)
+    eq('one row per list_window × drop combination', bt.ok and #bt.data.grid, 2)
+    local row = bt.ok and bt.data.grid[1]
+    eq('one stock fired: the one that actually fell', row and row.entries, 1)
+    check('ranked keeps only what clears min_entries', bt.ok and #bt.data.ranked >= 1)
+    check('the baseline is buying the same young stocks on any day, not just the winners',
+        bt.ok and bt.data.baseline and bt.data.baseline.n and bt.data.baseline.n > 0)
+
+    eq('a grid axis that is not numbers is refused', api_call('subnew.backtest',
+        { universe = 'market', list_window = '240,abc' }).error.code, 'bad_request')
+    eq('and one out of range', api_call('subnew.backtest',
+        { universe = 'market', drop = '0,50' }).error.code, 'bad_request')
+end
+
 local function test_review()
     section('daily review')
     local sect = source_em_parse_sectors(fixture('em_sectors.json'))
@@ -2364,7 +2499,8 @@ local DATA = 'tmp/unit-data'
 local function clean()
     for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
                          'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json',
-                         'market.json', 'signals.json', 'quotes/600001.json', 'quotes/300002.json' }) do
+                         'market.json', 'signals.json', 'quotes/600001.json', 'quotes/300002.json',
+                         'quotes/300003.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -2403,6 +2539,7 @@ local function run_all()
     test_review()
     test_backtest()
     test_breakout()
+    test_subnew()
     test_groups()
 end
 
