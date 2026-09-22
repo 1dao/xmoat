@@ -290,9 +290,11 @@ function g_exports.report_sweep_markdown(r)
     end
     line()
     f('信号：%s', r.signal_note or '')
-    f('%s；按持有 %d 日的%s排名；走平用 %d 个交易日判断%s',
-        r.stocks and string.format('%d 只股票（%s，%s – %s，共 %d 个交易日的数据）',
-            r.stocks, r.universe or '—', r.from or '—', r.to or '—', r.days or 0)
+    local sp = r.span or {}
+    f('%s；按持有 %d 日的%s排名；横盘看前 %d 个交易日%s',
+        r.stocks and string.format('%d 只股票（%s）：每只的日线中位 %s 天，多数从 %s 起（最早 %s）到 %s',
+            r.stocks, r.universe or '—', tostring(sp.median_days or '—'), sp.typical_from or '—',
+            sp.earliest_from or r.from or '—', sp.to or r.to or '—')
             or string.format('区间 %s – %s（%d 个交易日）', r.from or '—', r.to or '—', r.days or 0),
         r.horizon or 0,
         OBJ[r.objective] or r.objective, r.flat_lookback or 0,
@@ -313,8 +315,8 @@ function g_exports.report_sweep_markdown(r)
     end
     line('## 最优')
     line()
-    f('**%d 日均线（约 %.0f 周）+ %s，走平容忍 %s**', b.ma_days, b.ma_days / 5,
-        report_pct(b.above_pct, 1), report_pct(b.flat_max, 1))
+    f('**%d 日均线（约 %.0f 周），上穿时高出 %s，横盘振幅 ≤ %s**', b.ma_days, b.ma_days / 5,
+        report_pct(b.above_pct, 1), report_pct(b.flat_max, 0))
     f('- 触发 %d 次（有 %d 次有完整的持有期），胜率 %s', b.entries or 0, b.n or 0,
         report_pct(b.win_rate, 0))
     f('- 中位数 %s，平均 %s，最好 %s，最差 %s', report_pct(b.median, 1), report_pct(b.avg, 1),
@@ -333,11 +335,11 @@ function g_exports.report_sweep_markdown(r)
 
     line('## 排名前 10')
     line()
-    line('| 均线 | 高出 | 走平 | 触发 | 胜率 | 中位数 | 平均 | 最差 | 止盈/止损 |')
+    line('| 均线 | 高出 | 横盘振幅 | 触发 | 胜率 | 中位数 | 平均 | 最差 | 止盈/止损 |')
     line('|---|---|---|---|---|---|---|---|---|')
     for _, x in ipairs(r.ranked or {}) do
         f('| %d 日 | %s | %s | %d | %s | %s | %s | %s | %d/%d |', x.ma_days,
-            report_pct(x.above_pct, 1), report_pct(x.flat_max, 1), x.n or 0,
+            report_pct(x.above_pct, 1), report_pct(x.flat_max, 0), x.n or 0,
             report_pct(x.win_rate, 0), report_pct(x.median, 1), report_pct(x.avg, 1),
             report_pct(x.worst, 1), x.hit_tp or 0, x.hit_sl or 0)
     end
@@ -358,7 +360,8 @@ function g_exports.report_attribute_markdown(r, top)
     local NAME = { industry = '行业', board = '板块', region = '地域' }
     top = top or 10
 
-    f('# 分组归因：%d 日均线走平 + 突破 %s', p.ma_days or 0, report_pct(p.above_pct, 1))
+    f('# 分组归因：横盘 %d 日（振幅 ≤ %s）后上穿 %d 日均线', p.flat_lookback or 0,
+        report_pct(p.flat_max, 0), p.ma_days or 0)
     line()
     f('%s %d 只股票，持有 %d 个交易日；一组至少 %d 次信号才参与排名',
         r.universe or '—', r.stocks or 0, r.horizon or 0, r.min_signals or 0)
@@ -410,10 +413,12 @@ function g_exports.report_scan_markdown(r)
     local function f(...) line(string.format(...)) end
     local p = r.params or {}
 
-    f('# 信号扫描：%d 日均线走平 + 突破 %s', p.ma_days or 0, report_pct(p.above_pct, 1))
+    f('# 信号扫描：横盘 %d 日（振幅 ≤ %s）后上穿 %d 日均线%s', p.flat_lookback or 0,
+        report_pct(p.flat_max, 0), p.ma_days or 0,
+        (p.above_pct or 0) > 0 and string.format('（高出 %s）', report_pct(p.above_pct, 1)) or '')
     line()
-    f('范围：%s，看了 %d 只；走平容忍 %s（%d 个交易日内）；%s%s',
-        r.universe or '—', r.checked or 0, report_pct(p.flat_max, 1), p.flat_lookback or 0,
+    f('范围：%s，看了 %d 只；%s%s',
+        r.universe or '—', r.checked or 0,
         (p.cooldown or 1) > 1
             and string.format('最近 %d 个交易日内首次突破的（两次信号至少隔 %d 个交易日）', r.days or 1, p.cooldown)
             or string.format('最近 %d 个交易日内条件成立的', r.days or 1),
@@ -422,12 +427,12 @@ function g_exports.report_scan_markdown(r)
     if #(r.hits or {}) == 0 then
         line('没有股票在发信号。')
     else
-        line('| 代码 | 名称 | 信号日 | 收盘 | 均线 | 高出 | 均线斜率 | 当日涨幅 | 信号日以来 | PE | ROE |')
+        line('| 代码 | 名称 | 信号日 | 收盘 | 均线 | 高出 | 横盘振幅 | 当日涨幅 | 信号日以来 | PE | ROE |')
         line('|---|---|---|---|---|---|---|---|---|---|---|')
         for _, x in ipairs(r.hits) do
             f('| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |', x.code, x.name or '—',
                 x.date, num(x.close), num(x.ma), report_pct(x.above, 1),
-                report_pct(x.slope, 1), report_pct(x.day_gain, 1), report_pct(x.since_pct, 1),
+                report_pct(x.width, 1), report_pct(x.day_gain, 1), report_pct(x.since_pct, 1),
                 num(x.pe_ttm, 1), report_pct(x.roe, 1))
         end
     end

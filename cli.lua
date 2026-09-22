@@ -48,7 +48,7 @@ local USAGE = [[
   market-refresh            抓取全市场快照（约 15 次请求）
   review [offline]          当日复盘：大盘与 regime、板块结构、自选表现
   backtest <代码> [信号]    在这只股票的历史上回放信号：value/trend/value_trend/band/breakout
-  sweep <代码> [k=v ...]    参数网格（单只股票）：均线走平后突破，哪组窗口和幅度最好
+  sweep <代码> [k=v ...]    参数网格（单只股票）：横盘后上穿均线，哪组窗口和幅度最好
                             如 sweep 600519 horizon=60 max_worst=-15 min_entries=15
   stocks [k=v ...]          全市场股票列表（本地快照），如 stocks board=star industry=半导体
   prefetch [k=v ...]        批量抓日线备好本地，如 prefetch universe=market limit=500 bars_days=400

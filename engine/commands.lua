@@ -560,14 +560,14 @@ end
 local function install_sweep()
     api_define({
         name = 'backtest.sweep', method = 'GET', path = '/api/v1/stocks/:code/backtest/sweep',
-        summary = '参数网格：均线走平后突破，哪一组窗口与幅度在这只股票的历史上最好',
+        summary = '参数网格：横盘后上穿均线，哪一组均线、幅度与横盘振幅在这只股票的历史上最好',
         params = {
             code = code_param(),
             horizon = { type = 'integer', doc = '按持有多少个交易日排名，默认 60' },
             ma_days = { type = 'string', doc = '均线窗口（交易日），逗号分隔，默认 30,40,50,60,70' },
             above_pct = { type = 'string', doc = '高出均线的幅度 %，逗号分隔，默认 3,4,5,6,7,8,10' },
-            flat_max = { type = 'string', doc = '走平容忍度 %，逗号分隔，默认 1,2,3' },
-            flat_lookback = { type = 'integer', doc = '用多少个交易日判断走平，默认 25' },
+            flat_max = { type = 'string', doc = '横盘振幅上限 %（最高价比最低价高出多少），逗号分隔，默认 8,10,12,15,20' },
+            flat_lookback = { type = 'integer', doc = '横盘看前多少个交易日，默认 BREAKOUT_FLAT_LOOKBACK（40，8 周）' },
             min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0（不要求）' },
             cooldown = { type = 'integer', doc = '两次信号之间的最小间隔，默认 20' },
             take_profit = { type = 'number', doc = '止盈 %，默认 20' },
@@ -625,7 +625,7 @@ local function strategy_params(with_grid)
         cap_min = { type = 'number', doc = '总市值下限（亿元）' },
         industry = { type = 'string' },
         include_st = { type = 'boolean' },
-        flat_lookback = { type = 'integer', doc = '用多少个交易日判断走平，默认 25' },
+        flat_lookback = { type = 'integer', doc = '横盘看前多少个交易日，默认 BREAKOUT_FLAT_LOOKBACK（40，8 周）' },
         min_day_gain = { type = 'number', doc = '当天涨幅下限 %，默认 0' },
         offline = { type = 'boolean', doc = '只用本地行情缓存，不联网' },
         price_source = { type = 'string', enum = { 'tdx', 'em' },
@@ -635,7 +635,7 @@ local function strategy_params(with_grid)
         p.horizon = { type = 'integer', doc = '按持有多少个交易日排名，默认 60' }
         p.ma_days = { type = 'string', doc = '均线窗口，逗号分隔，默认 30,40,50,60,70' }
         p.above_pct = { type = 'string', doc = '高出均线的幅度 %，逗号分隔，默认 3,4,5,6,7,8,10' }
-        p.flat_max = { type = 'string', doc = '走平容忍度 %，逗号分隔，默认 1,2,3' }
+        p.flat_max = { type = 'string', doc = '横盘振幅上限 %，逗号分隔，默认 8,10,12,15,20' }
         p.cooldown = { type = 'integer', doc = '两次信号之间的最小间隔，默认 20' }
         p.take_profit = { type = 'number', doc = '止盈 %，默认 20' }
         p.stop_loss = { type = 'number', doc = '止损 %，默认 10' }
@@ -645,11 +645,11 @@ local function strategy_params(with_grid)
         p.max_worst = { type = 'number', doc = '最差一笔的下限 %，如 -15' }
         p.max_sl = { type = 'integer', doc = '先到止损的次数上限' }
     else
-        p.ma_days = { type = 'integer', doc = '均线窗口（交易日），默认 BREAKOUT_MA_DAYS（40，8 周）' }
+        p.ma_days = { type = 'integer', doc = '均线窗口（交易日），默认 BREAKOUT_MA_DAYS（50，10 周）' }
         p.ma_weeks = { type = 'number', doc = '均线窗口按周说，一周 5 个交易日；和 ma_days 只给一个' }
-        p.flat_weeks = { type = 'number', doc = '走平按周判断；和 flat_lookback 只给一个' }
-        p.above_pct = { type = 'number', doc = '高出均线的幅度 %，默认 BREAKOUT_ABOVE_PCT（3）' }
-        p.flat_max = { type = 'number', doc = '走平容忍度 %，默认 BREAKOUT_FLAT_MAX（1）' }
+        p.flat_weeks = { type = 'number', doc = '横盘按周说；和 flat_lookback 只给一个' }
+        p.above_pct = { type = 'number', doc = '上穿时高出均线的幅度 %，默认 BREAKOUT_ABOVE_PCT（0，即上穿即可）' }
+        p.flat_max = { type = 'number', doc = '横盘振幅上限 %，默认 BREAKOUT_FLAT_MAX（10）' }
         p.days = { type = 'integer', doc = '最近几个交易日内出现的信号都算，默认 1' }
         p.rule = { type = 'string', enum = { 'breakout' }, doc = '内置规则，见 strategy.rules；默认 breakout' }
         p.cooldown = { type = 'integer',
@@ -682,7 +682,7 @@ end
 local function install_strategy()
     api_define({
         name = 'strategy.sweep', method = 'GET', path = '/api/v1/strategy/sweep',
-        summary = '在一组股票上一起拟合参数：均线走平后突破，哪组窗口与幅度最好',
+        summary = '在一组股票上一起拟合参数：横盘后上穿均线，哪组均线、幅度与横盘振幅最好',
         params = strategy_params(true),
         handler = function(p)
             if p.limit and (p.limit < 1 or p.limit > 6000) then
@@ -797,7 +797,7 @@ local function install_strategy()
 
     api_define({
         name = 'strategy.scan', method = 'GET', path = '/api/v1/strategy/scan',
-        summary = '扫描现在正在发出信号的股票：均线走平后突破',
+        summary = '扫描刚刚横盘突破的股票：前几周振幅很小，今天收盘上穿均线',
         params = strategy_params(false),
         handler = function(p)
             if p.limit and (p.limit < 1 or p.limit > 6000) then
@@ -827,8 +827,8 @@ local function install_strategy()
             if p.above_pct and (p.above_pct < 0 or p.above_pct > 50) then
                 return nil, 'bad_request', 'above_pct 应在 0 到 50 之间'
             end
-            if p.flat_max and (p.flat_max < 0 or p.flat_max > 20) then
-                return nil, 'bad_request', 'flat_max 应在 0 到 20 之间'
+            if p.flat_max and (p.flat_max < 1 or p.flat_max > 50) then
+                return nil, 'bad_request', 'flat_max 应在 1 到 50 之间'
             end
             if p.cooldown and (p.cooldown < 1 or p.cooldown > 250) then
                 return nil, 'bad_request', 'cooldown 应在 1 到 250 之间'

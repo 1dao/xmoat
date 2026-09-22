@@ -1546,48 +1546,70 @@ local function test_breakout()
     eq('and is the mean of the window', ma[5], 3)
     eq('at the end too', ma[10], 8)
 
-    -- A hundred flat days, then one that jumps 7%. The average barely moves,
-    -- so it is flat, and the close is 7% above it.
+    -- A hundred days in a narrow band — closing at 100, trading 99 to 101, so
+    -- 2% top to bottom — then a day that closes at `jump`, crossing the 50-day
+    -- line from below.
     local function flat_then(jump, day_gain)
         local px = {}
         for i = 1, 100 do
             px[i] = { date = util_date_add_days('2024-01-01', i), close = 100,
-                      high = 100, low = 100, change_pct = 0 }
+                      high = 101, low = 99, change_pct = 0 }
         end
         px[101] = { date = util_date_add_days('2024-01-01', 101), close = jump,
                     high = jump, low = 99, change_pct = day_gain or (jump - 100) }
         return px
     end
+    local BASE = { ma_days = 50, flat_lookback = 40, flat_max = 10, above_pct = 0 }
+    local function with(extra)
+        local o = util_copy(BASE)
+        for k, v in pairs(extra or {}) do o[k] = v end
+        return o
+    end
     local px = flat_then(107)
-    eq('a 7% break above a flat average fires', #backtest_breakout(px,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 1)
-    eq('the same break does not clear a 8% bar', #backtest_breakout(px,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 8 }).entries, 0)
-    local e = backtest_breakout(px, { ma_days = 50, flat_lookback = 25, flat_max = 2,
-                                      above_pct = 6 }).entries[1]
-    check('the entry says how far above it was', e.above > 6 and e.above < 7, e.above)
-    near('and how flat the average was', e.slope, 0, 0.3)
+    eq('a close crossing the 10-week line out of a narrow base fires',
+        #backtest_breakout(px, BASE).entries, 1)
+    local e = backtest_breakout(px, BASE).entries[1]
+    near('the entry says how wide the base was', e.width, (101 / 99 - 1) * 100, 1e-9)
+    eq('and where its top was', e.box_high, 101)
+    check('and how far above the line it closed', e.above > 6 and e.above < 7, e.above)
+    eq('a cross that must clear the line by 8% does not', #backtest_breakout(px,
+        with({ above_pct = 8 })).entries, 0)
 
-    -- The same distance above a RISING average is not a base breaking, it is
-    -- a stock that has been going up: the flatness test is what separates them.
+    -- 海安集团's shape: a flat AVERAGE with the price swinging 92 to 108 around
+    -- it. The first version of the rule called that a base; the price range
+    -- says it is not one.
+    local swinging = {}
+    for i = 1, 99 do
+        local c = (i % 2 == 0) and 108 or 92
+        swinging[i] = { date = util_date_add_days('2024-01-01', i), close = c,
+                        high = c + 1, low = c - 1, change_pct = 0 }
+    end
+    swinging[100] = { date = util_date_add_days('2024-01-01', 100), close = 95, high = 96, low = 94, change_pct = 0 }
+    swinging[101] = { date = util_date_add_days('2024-01-01', 101), close = 103, high = 104, low = 95, change_pct = 8 }
+    eq('prices swinging 20% around a flat average are not a base', #backtest_breakout(swinging,
+        BASE).entries, 0)
+    -- Swinging like that, it crosses the line every other day; allowed a wide
+    -- base and no cooldown, the last day is one of those crosses.
+    local wide = backtest_breakout(swinging, with({ flat_max = 25, cooldown = 1 })).entries
+    eq('though the same cross counts once the base may be that wide', wide[#wide] and wide[#wide].index, 101)
+
+    -- A stock that has only gone up sits above its average the whole time:
+    -- there is no day it crosses from below, however wide a base is allowed.
     local rising = {}
     for i = 1, 120 do
         rising[i] = { date = util_date_add_days('2024-01-01', i), close = 100 * 1.01 ^ i,
                       high = 100 * 1.01 ^ i, low = 100 * 1.01 ^ i, change_pct = 1 }
     end
-    eq('a rising average never counts as flat', #backtest_breakout(rising,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 0)
-    check('unless the flatness test is switched off', #backtest_breakout(rising,
-        { ma_days = 50, flat_lookback = 25, flat_max = 100, above_pct = 6 }).entries > 0)
+    eq('a stock already above its line is not crossing it', #backtest_breakout(rising,
+        with({ flat_max = 1000 })).entries, 0)
 
     -- The day's own rise, for reading the rule the other way.
     local quiet_break = flat_then(107, 0.5)
-    eq('a quiet drift over the line still fires by default', #backtest_breakout(quiet_break,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6 }).entries, 1)
+    eq('a quiet cross still fires by default', #backtest_breakout(quiet_break, BASE).entries, 1)
     eq('but not when the day itself must have jumped', #backtest_breakout(quiet_break,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6, min_day_gain = 5 }).entries, 0)
+        with({ min_day_gain = 5 })).entries, 0)
 
-    -- The cooldown, on a series that stays above the line for days.
+    -- A series that stays above the line for a month crossed it once.
     local sustained = {}
     for i = 1, 100 do
         sustained[i] = { date = util_date_add_days('2024-01-01', i), close = 100,
@@ -1597,24 +1619,31 @@ local function test_breakout()
         sustained[i] = { date = util_date_add_days('2024-01-01', i), close = 107,
                          high = 107, low = 107, change_pct = 0 }
     end
-    -- One signal, not thirty: the cooldown covers the first twenty days, and by
-    -- the time it expires the average itself has been pulled up — the base is
-    -- no longer flat, and a base breakout is over once the base has moved.
     eq('a standing breakout is one signal', #backtest_breakout(sustained,
-        { ma_days = 50, flat_lookback = 25, flat_max = 2, above_pct = 6, cooldown = 20 }).entries, 1)
+        with({ cooldown = 20 })).entries, 1)
 
     -- The rule's own numbers come from config, so changing them is a config
     -- change and not a code change — and the fallbacks are what xmoat.cfg says.
     local d = backtest_breakout_params()
-    eq('the window is the fitted one', d.ma_days, 40)
-    eq('so is the breakout threshold', d.above_pct, 3)
-    eq('and the flatness tolerance', d.flat_max, 1)
-    eq('with the window it is judged over', d.flat_lookback, 25)
+    eq('the line is the 10-week average', d.ma_days, 50)
+    eq('crossed at all, not by a margin', d.above_pct, 0)
+    eq('out of a base no wider than 10%', d.flat_max, 10)
+    eq('that lasted eight weeks', d.flat_lookback, 40)
     -- Same bars, once with the defaults and once naming them: same answer.
     eq('an unnamed parameter falls back to the configured one',
         #backtest_breakout(px, {}).entries,
         #backtest_breakout(px, { ma_days = d.ma_days, above_pct = d.above_pct,
                                  flat_max = d.flat_max, flat_lookback = d.flat_lookback }).entries)
+
+    -- A pooled grid says what a typical stock contributed, not only the
+    -- earliest first day: one stock with five years among a thousand with
+    -- eighteen months must not read as a five-year result.
+    local md = report_sweep_markdown({ stocks = 1000, universe = 'market', horizon = 60,
+        objective = 'median', flat_lookback = 40, grid = {}, ranked = {}, baseline = {},
+        span = { median_days = 400, typical_from = '2025-03-03', earliest_from = '2019-04-09',
+                 to = '2026-09-21' } })
+    check('a grid report gives the typical history, not just the earliest day',
+        md:find('日线中位 400 天，多数从 2025-03-03 起（最早 2019-04-09）', 1, true), md:sub(1, 400))
 
     -- The grid, and what is done with it.
     local rows = backtest_sweep_grid(sustained, { horizon = 5, ma_days = { 40, 50 },
@@ -1825,9 +1854,10 @@ local function test_market()
     eq('the first is the weekly-base breakout', rule.id, 'breakout')
     local def = {}
     for _, f in ipairs(rule.fields or {}) do def[f.name] = f.default end
-    eq('its average is said in weeks: the configured 40 days are 8', def.ma_weeks, 8)
-    eq('its threshold is the configured 3%', def.above_pct, 3)
-    eq('and its base is five weeks flat', def.flat_weeks, 5)
+    eq('its average is said in weeks: the configured 50 days are 10', def.ma_weeks, 10)
+    eq('crossed at all, not by a margin', def.above_pct, 0)
+    eq('out of a base of eight weeks', def.flat_weeks, 8)
+    eq('no wider than 10% top to bottom', def.flat_max, 10)
 
     -- 甲公司 flat at 100 for two hundred days, and 4% above that today.
     local today, bars = util_today(), {}
@@ -1898,7 +1928,15 @@ local function test_market()
     eq('on its first day', recent and recent.bars_ago, 2)
     near('with how far it has gone since', recent and recent.since_pct, (106 / 104 - 1) * 100, 1e-6)
     eq('and today\'s close beside it', recent and recent.last_close, 106)
-    eq('every day the condition holds, when asked for', #scan_of({ cooldown = 1 }).hits, 1)
+    near('and how wide its base was', recent and recent.width, 0, 1e-9)
+
+    -- A record kept under the rule's earlier definition says nothing about
+    -- this one: it is dropped on load, not mixed in.
+    store_save('signals', { version = 1, seq = 1, items = { { seq = 1, id = 'breakout|600009|' .. today,
+        rule = 'breakout', code = '600009', signal_date = today, signal_close = 10, pushed = false } } })
+    signals_load()
+    eq('entries of an earlier definition are dropped', signals_list({}).total, 0)
+    eq('and none of them is waiting to be pushed', #signals_pending(), 0)
 
     -- Kept: the rule as configured, found once, with the price it was found at.
     __signals_set_daily(true)

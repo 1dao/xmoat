@@ -1201,8 +1201,9 @@
     box.append(h('div', { class: 'card-head' },
       h('h2', { text: `${res.hits.length} 只首次突破` }),
       h('span', { class: 'muted', text:
-        `看了 ${res.checked} 只 · ${fmtCount(p.ma_weeks)} 周均线 + ${fmtPct(p.above_pct)}` +
-        ` · 前 ${fmtCount(p.flat_weeks)} 周走平（±${fmtPct(p.flat_max)}）` +
+        `看了 ${res.checked} 只 · 上穿 ${fmtCount(p.ma_weeks)} 周均线` +
+        (p.above_pct > 0 ? ` + ${fmtPct(p.above_pct)}` : '') +
+        ` · 横盘 ${fmtCount(p.flat_weeks)} 周、振幅 ≤ ${fmtPct(p.flat_max, 0)}` +
         (res.days > 1 ? ` · 最近 ${res.days} 个交易日` : ' · 当日') }),
       h('span', { class: 'spacer' }),
       h('span', { class: 'muted small', text: '扫描于 ' + fmtTime(at) })));
@@ -1214,7 +1215,7 @@
         h('thead', {}, h('tr', {},
           h('th', { text: '股票' }), h('th', { text: '信号日' }),
           h('th', { class: 'r', text: '收盘' }), h('th', { class: 'r', text: '均线' }),
-          h('th', { class: 'r', text: '高出' }), h('th', { class: 'r', text: '均线变动' }),
+          h('th', { class: 'r', text: '高出' }), h('th', { class: 'r', text: '横盘振幅' }),
           h('th', { class: 'r', text: '当日涨幅' }),
           since && h('th', { class: 'r', text: '信号日以来' }),
           h('th', { class: 'r', text: '市值' }),
@@ -1254,7 +1255,7 @@
       h('td', { class: 'r num', 'data-label': '收盘', text: fmtNum(r.close) }),
       h('td', { class: 'r num', 'data-label': '均线', text: fmtNum(r.ma) }),
       h('td', { class: 'r num', 'data-label': '高出', text: fmtPct(r.above) }),
-      h('td', { class: 'r num', 'data-label': '均线变动', text: fmtPct(r.slope) }),
+      h('td', { class: 'r num', 'data-label': '横盘振幅', text: fmtPct(r.width) }),
       h('td', { class: 'r num', 'data-label': '当日涨幅', text: fmtPct(r.day_gain) }),
       since && h('td', { class: 'r num', 'data-label': '信号日以来', text: fmtGain(r.since_pct) }),
       h('td', { class: 'r num', 'data-label': '市值', text: fmtMoney(r.market_cap) }),

@@ -360,7 +360,7 @@ type Barrier = {
 
 ### Sweep 与 Scan
 
-口径见 [METRICS.md](METRICS.md#均线走平后的突破)。`Sweep` 是参数网格，`Scan` 是「现在谁在发信号」。
+口径见 [METRICS.md](METRICS.md#横盘之后上穿均线)。`Sweep` 是参数网格，`Scan` 是「现在谁在发信号」。
 两者都可以指定股票范围：`codes`（逗号分隔）优先，其次 `universe=screen`（用全市场快照按 `roe_min` 等条件筛），
 默认是自选。
 
@@ -422,7 +422,8 @@ type Scan = {
     code: string, name?: string, industry?: string,
     date: string, close: number, ma: number, // 信号日（突破第一天）与当天收盘
     above: number,                          // 高出均线 %
-    slope: number,                          // 均线在 flat_lookback 内的变动 %
+    width: number,                          // 横盘振幅：这段横盘里最高价比最低价高出 %
+    box_high: number,                       // 横盘区间的顶
     day_gain?: number, bars_ago: number,    // 距今几个交易日
     last_date: string, last_close: number,  // 最新一根 K 线
     since_pct?: number,                     // 信号日以来涨了多少 %
@@ -450,7 +451,8 @@ type SignalList = {
     added_at: string, added_close: number,       // 记下来的时间，以及当时的最新收盘
     last_date: string, last_close: number,       // 每次扫描顺手更新
     since_signal_pct?: number, since_added_pct?: number,   // 读取时算
-    above?: number, day_gain?: number, pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+    ma?: number, above?: number, width?: number, day_gain?: number,   // 信号日的均线、高出、横盘振幅
+    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
     pushed: boolean | 'skipped' | 'failed',
   }[],                                      // 新的在前
 }

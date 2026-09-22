@@ -29,6 +29,13 @@
 
 local MAX_ATTEMPTS = 3
 local RULE = 'breakout'
+-- Which definition of the rule an entry was found by. 1 was "the 40-day
+-- average flat over five weeks, close 3% above it", which let through prices
+-- swinging 20% around a flat average and ran behind the market; 2 is a real
+-- base (the price within 10% for eight weeks) and a cross of the 10-week line.
+-- Entries of another definition are dropped on load: two rules in one record
+-- say nothing about either.
+local DEF = 2
 
 local doc = nil           -- { version = 1, seq = n, items = {...}, last_run = {...} }
 local daily_override = nil
@@ -44,6 +51,14 @@ function g_exports.signals_load()
     end
     doc = loaded
     doc.seq = tonumber(doc.seq) or #doc.items
+    local kept, dropped = {}, 0
+    for _, s in ipairs(doc.items) do
+        if s.def == DEF then kept[#kept + 1] = s else dropped = dropped + 1 end
+    end
+    if dropped > 0 then
+        doc.items, doc.last_run = kept, nil
+        cfg_log_info('signals: %d entries of an earlier definition of the rule dropped', dropped)
+    end
     return true
 end
 
@@ -102,10 +117,10 @@ function g_exports.signals_record(scan, source)
                 known[id] = true
                 doc.seq = doc.seq + 1
                 added[#added + 1] = {
-                    seq = doc.seq, id = id, rule = RULE,
+                    seq = doc.seq, id = id, rule = RULE, def = DEF,
                     code = h.code, name = h.name, industry = h.industry,
                     signal_date = h.date, signal_close = h.close,
-                    ma = h.ma, above = h.above, day_gain = h.day_gain,
+                    ma = h.ma, above = h.above, width = h.width, day_gain = h.day_gain,
                     added_at = now, added_date = h.last_date, added_close = h.last_close,
                     last_date = h.last_date, last_close = h.last_close,
                     pe_ttm = h.pe_ttm, pb = h.pb, roe = h.roe, market_cap = h.market_cap,

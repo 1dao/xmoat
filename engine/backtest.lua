@@ -34,7 +34,7 @@ local SIGNALS = {
     trend = '技术面：均线多头排列',
     value_trend = '两者同时满足：便宜，而且已经不再下跌',
     band = '你设置的合理区间：锚指标低于区间下沿',
-    breakout = '均线走平之后，股价放到均线上方一定幅度（默认 8 周均线 + 3%，来自网格拟合）',
+    breakout = '横盘之后上穿均线：前 8 周最高价与最低价相差不超过 10%，当天收盘上穿 10 周线（默认值）',
 }
 
 g_exports.backtest_signal_list = SIGNALS
@@ -45,23 +45,20 @@ local PRICE_ONLY = { breakout = true }
 
 -- The rule's numbers, in one place, from config.
 --
--- THESE ARE THE GRID'S ANSWER, NOT A TRUTH. strategy.sweep over 5,254 stocks
--- and five years put the best median return at a 40-day average (eight weeks)
--- broken by three percent, with the average flat to within one percent over
--- the preceding five weeks — a median 60-day return 2.6 points above buying on
--- any day of the same window, and a win rate 7 points above it. Requiring the
--- base to be flat for ten weeks instead of five measured +3.0 and +7: the same
--- thing, within noise, on half the signals. The starting guess of a 10-week
--- average broken by 6% was positive too, by about a point.
---
--- So: a lower breakout threshold is what carried the edge, not a longer base.
--- Change these when a grid says something different, and say which grid.
+-- NOT A FITTED EDGE. These are the rule as it is meant (a base of eight weeks
+-- within 10%, then a cross of the 10-week average), not a grid's pick. On the
+-- whole market, 2021 to 2026, held 60 trading days and compared with buying on
+-- any day of the same year, it came out 0.4 points ahead with the same win
+-- rate: positive in three years of five, and -2.0 in 2025, the year with the
+-- most signals. Held 20 days it was slightly behind. The variants beside it
+-- (ten weeks, 3% above the line, closing over the top of the base) all landed
+-- between 0 and +0.4, so there is nothing to tune here on the same data.
 function g_exports.backtest_breakout_params()
     return {
-        ma_days = cfg_int('BREAKOUT_MA_DAYS', 40),
-        above_pct = cfg_num('BREAKOUT_ABOVE_PCT', 3),
-        flat_max = cfg_num('BREAKOUT_FLAT_MAX', 1),
-        flat_lookback = cfg_int('BREAKOUT_FLAT_LOOKBACK', 25),
+        ma_days = cfg_int('BREAKOUT_MA_DAYS', 50),
+        above_pct = cfg_num('BREAKOUT_ABOVE_PCT', 0),
+        flat_max = cfg_num('BREAKOUT_FLAT_MAX', 10),
+        flat_lookback = cfg_int('BREAKOUT_FLAT_LOOKBACK', 40),
         min_day_gain = cfg_num('BREAKOUT_MIN_DAY_GAIN', 0),
         cooldown = cfg_int('BACKTEST_COOLDOWN', 20),
     }
@@ -90,16 +87,44 @@ end
 -- because it is a different shape of question: no valuation, no expanding
 -- window, just the bars.
 --
+-- THE RULE: the price has gone sideways — the highest high and the lowest low
+-- of the `flat_lookback` days before today are within `flat_max`% of each
+-- other — and today the close crosses above the `ma_days` average (by
+-- `above_pct`%; 0 means crossing it at all).
+--
+-- The base is measured on the PRICE. The first version asked only that the
+-- AVERAGE end where it had started five weeks earlier, and an average does
+-- that just as well when the price swings 20% either side of it: 海安集团 on
+-- 2026-09-21 had moved 0.4% on its 40-day average and 22% top to bottom on its
+-- price, and was signalled. On five years of the whole market that version
+-- ran 1.6 points behind buying on any day of the same year.
+--
+-- A CROSS, not a level: yesterday's close was at or under the line and
+-- today's is over it. A stock that has sat above its average for a week is not breaking
+-- out today. `cooldown` then keeps a stock that crosses back and forth from
+-- counting as several breakouts in a month.
+--
 -- opts = {
---   ma_days,               -- the average's window in trading days (40 = 8 weeks)
---   flat_lookback,         -- over how many days "flat" is judged
---   flat_max,              -- how much it may have moved in that time, %
---   above_pct,             -- how far above the average the close must be, %
+--   ma_days,               -- the average's window in trading days (50 = 10 weeks)
+--   flat_lookback,         -- how many days before today make the base
+--   flat_max,              -- how wide the base may be, top to bottom, %
+--   above_pct,             -- how far above the average the close must cross, %
 --   min_day_gain,          -- and how much the day itself must have risen, %
 --   cooldown,
--- Anything left out comes from backtest_breakout_params (config).
 --   ma = <a prepared series>,
 -- }
+-- Anything left out comes from backtest_breakout_params (config).
+local function price_range(px, from, to)
+    local hi, lo
+    for k = from, to do
+        local h, l = util_num(px[k].high), util_num(px[k].low)
+        if not h or not l then return nil end
+        if not hi or h > hi then hi = h end
+        if not lo or l < lo then lo = l end
+    end
+    return hi, lo
+end
+
 function g_exports.backtest_breakout(px, opts)
     opts = opts or {}
     px = px or {}
@@ -114,22 +139,23 @@ function g_exports.backtest_breakout(px, opts)
 
     local ma = opts.ma or backtest_ma_series(px, n)
     local entries, tested, last_fire = {}, 0, nil
-    for i = n + look, #px do
-        local now, before = ma[i], ma[i - look]
-        local close = util_num(px[i].close)
-        if now and before and close and before > 0 then
+    for i = math.max(n, look) + 1, #px do
+        local line, pline = ma[i], ma[i - 1]
+        local close, prev = util_num(px[i].close), util_num(px[i - 1].close)
+        if line and pline and close and prev then
             tested = tested + 1
-            -- Flat: the average has gone nowhere over the lookback. This is
-            -- the part that makes it a base and not a chase — the same 6%
-            -- above a rising average is just a stock that has been going up.
-            local slope = (now - before) / before * 100
             local gain = util_num(px[i].change_pct) or 0
-            if math.abs(slope) <= flat_max and close >= now * (1 + above) and gain >= day_gain then
-                if not last_fire or (i - last_fire) >= cooldown then
+            -- The cheap tests first: a cross is a few days a year, and only
+            -- then is the base worth measuring.
+            if close > line * (1 + above) and prev <= pline * (1 + above) and gain >= day_gain
+                and (not last_fire or (i - last_fire) >= cooldown) then
+                local hi, lo = price_range(px, i - look, i - 1)
+                local width = (hi and lo and lo > 0) and (hi / lo - 1) * 100 or nil
+                if width and width <= flat_max then
                     last_fire = i
                     entries[#entries + 1] = { date = px[i].date, index = i, close = close,
-                                              ma = now, slope = slope,
-                                              above = (close - now) / now * 100,
+                                              ma = line, width = width, box_high = hi, box_low = lo,
+                                              above = (close - line) / line * 100,
                                               day_gain = gain }
                 end
             end
@@ -392,9 +418,12 @@ end
 -- not a guarantee about the future.
 -- ---------------------------------------------------------------------------
 
+-- The grid's default axes: the average, how far above it the close crosses,
+-- and how wide the base may be. Shared with strategy.lua's pooled sweep.
 local SWEEP_MA = { 30, 40, 50, 60, 70 }
-local SWEEP_ABOVE = { 3, 4, 5, 6, 7, 8, 10 }
-local SWEEP_FLAT = { 1, 2, 3 }
+local SWEEP_ABOVE = { 0, 1, 2, 3, 5 }
+local SWEEP_FLAT = { 8, 10, 12, 15, 20 }
+g_exports.backtest_sweep_axes = { ma_days = SWEEP_MA, above_pct = SWEEP_ABOVE, flat_max = SWEEP_FLAT }
 
 local OBJECTIVES = { median = true, avg = true, win_rate = true }
 
@@ -414,7 +443,7 @@ function g_exports.backtest_sweep_grid(px, opts)
     local mas = list_or(opts.ma_days, SWEEP_MA)
     local aboves = list_or(opts.above_pct, SWEEP_ABOVE)
     local flats = list_or(opts.flat_max, SWEEP_FLAT)
-    local look = opts.flat_lookback or 25
+    local look = opts.flat_lookback or backtest_breakout_params().flat_lookback
 
     local rows = {}
     for _, n in ipairs(mas) do
@@ -539,7 +568,7 @@ function g_exports.backtest_sweep(code, opts)
     -- The same statistics for buying on any day of the same window, so a row
     -- can be read as better or worse than doing nothing clever.
     local first = (opts.ma_days and opts.ma_days[#opts.ma_days] or SWEEP_MA[#SWEEP_MA]) +
-                  (opts.flat_lookback or 25)
+                  (opts.flat_lookback or backtest_breakout_params().flat_lookback)
     local base_entries = {}
     for i = math.min(first, #px), #px do
         base_entries[#base_entries + 1] = { index = i, date = px[i].date,

@@ -129,9 +129,10 @@ end
 function g_exports.strategy_collect(px, opts)
     opts = opts or {}
     local horizon = opts.horizon or 60
-    local mas = opts.ma_days or { 30, 40, 50, 60, 70 }
-    local aboves = opts.above_pct or { 3, 4, 5, 6, 7, 8, 10 }
-    local flats = opts.flat_max or { 1, 2, 3 }
+    local axes = backtest_sweep_axes
+    local mas = opts.ma_days or axes.ma_days
+    local aboves = opts.above_pct or axes.above_pct
+    local flats = opts.flat_max or axes.flat_max
     local d = backtest_breakout_params()
     local out = {}
     for _, n in ipairs(mas) do
@@ -226,8 +227,8 @@ function g_exports.strategy_sweep(opts)
     local fetch = prefetch(list, opts)
     local collected, used, skipped = {}, {}, {}
     local base_rets = {}
-    local first_offset = (opts.ma_days and math.max(table.unpack(opts.ma_days)) or 70) +
-                         (opts.flat_lookback or 25)
+    local look = opts.flat_lookback or backtest_breakout_params().flat_lookback
+    local first_offset = math.max(table.unpack(opts.ma_days or backtest_sweep_axes.ma_days)) + look
     for _, item in ipairs(list) do
         local px, why = bars_for(item.code, opts)
         if not px or #px < horizon + first_offset then
@@ -258,19 +259,30 @@ function g_exports.strategy_sweep(opts)
     end)
 
     local from, to, bars = nil, nil, 0
+    local lengths, starts = {}, {}
     for _, u in ipairs(used) do
         if not from or u.from < from then from = u.from end
         if not to or u.to > to then to = u.to end
         bars = bars + u.days
+        lengths[#lengths + 1] = u.days
+        starts[#starts + 1] = u.from
     end
+    -- What a typical stock contributed. The earliest first day alone reads as
+    -- "five years" when one stock in a thousand has them and the rest have
+    -- eighteen months — which is how a grid on a short cache once passed for
+    -- a five-year result.
+    table.sort(lengths)
+    table.sort(starts)
+    local mid = (#used + 1) // 2
+    local span = { median_days = lengths[mid], typical_from = starts[mid], earliest_from = from, to = to }
 
     return {
         universe = kind, stocks = #used, skipped = util_json_array(skipped),
         used = util_json_array(used), fetch = fetch,
-        from = from, to = to, days = bars,
+        from = from, to = to, days = bars, span = span,
         signal = 'breakout', signal_note = backtest_signal_list.breakout,
         horizon = horizon, objective = objective,
-        flat_lookback = opts.flat_lookback or 25,
+        flat_lookback = look,
         min_day_gain = opts.min_day_gain or 0,
         cooldown = opts.cooldown or 20,
         require_ = { min_entries = opts.min_entries or 10, min_win_rate = opts.min_win_rate,
@@ -313,21 +325,23 @@ function g_exports.strategy_rules()
         {
             id = 'breakout',
             title = '突破横盘周线',
-            summary = '均线走平一段时间之后，收盘价站上均线一定幅度：股价从一个平台里走了出来。',
-            -- What the grid measured, which stays true whatever the config
-            -- now says; the fields below carry the current values.
-            basis = '网格拟合（5254 只股票、五年）：8 周均线 + 3%、前 5 周走平（容忍 1%），' ..
-                    '60 日中位收益比同期随便哪天买高 2.6 个百分点，胜率高 7 个点；' ..
-                    '要求横盘满 10 周效果相近，但信号少一半。',
+            summary = '股价横盘一段时间（这段时间的最高价和最低价相差不超过一定幅度），' ..
+                      '然后收盘上穿均线：从一个窄平台里走了出来。',
+            -- What the backtest measured for the default numbers, which stays
+            -- true whatever the config now says; the fields carry the values.
+            basis = '5 年回测（2021–2026 全市场，默认参数，持有 60 个交易日，和同一年随便哪天买比）：' ..
+                    '中位收益高 0.4 个百分点、胜率持平；5 年里 3 年为正，信号最多的 2025 年 −2.0；' ..
+                    '持有 20 天略跑输。比旧的「均线走平 + 高出 3%」（−1.6）好，但还不能说有优势，' ..
+                    '下面的信号记录是往后的检验。',
             fields = util_json_array({
                 { name = 'ma_weeks', label = '均线', unit = '周', default = weeks(d.ma_days),
                   min = 1, max = 100, step = 1 },
-                { name = 'above_pct', label = '收盘高出均线', unit = '%', default = d.above_pct,
+                { name = 'above_pct', label = '上穿时高出均线', unit = '%', default = d.above_pct,
                   min = 0, max = 50, step = 0.5 },
-                { name = 'flat_weeks', label = '横盘：均线走平', unit = '周',
+                { name = 'flat_weeks', label = '横盘', unit = '周',
                   default = weeks(d.flat_lookback), min = 1, max = 52, step = 1 },
-                { name = 'flat_max', label = '走平容忍', unit = '%', default = d.flat_max,
-                  min = 0, max = 20, step = 0.5 },
+                { name = 'flat_max', label = '横盘振幅不超过', unit = '%', default = d.flat_max,
+                  min = 1, max = 50, step = 1 },
                 { name = 'min_day_gain', label = '当天至少涨', unit = '%', default = d.min_day_gain,
                   min = 0, max = 20, step = 0.5 },
                 { name = 'days', label = '首次突破在最近', unit = '个交易日内', default = 1,
@@ -409,7 +423,8 @@ function g_exports.strategy_scan(opts)
                 hits[#hits + 1] = {
                     code = item.code, name = item.name, industry = item.industry,
                     date = newest.date, close = newest.close, ma = newest.ma,
-                    above = newest.above, slope = newest.slope, day_gain = newest.day_gain,
+                    above = newest.above, width = newest.width, box_high = newest.box_high,
+                    day_gain = newest.day_gain,
                     bars_ago = #px - newest.index,
                     last_date = last.date, last_close = now,
                     since_pct = (now and newest.close > 0) and (now / newest.close - 1) * 100 or nil,
