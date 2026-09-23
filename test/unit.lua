@@ -1705,13 +1705,16 @@ end
 -- open equal to close except day 1's, which is always 100 — the reference
 -- price every signal here is measured against.
 -- changes = { { from = i, close = c }, ... }
+-- Dates END at today, like a real cache does: the record keeps entries by
+-- signal day (SIGNALS_KEEP_DAYS) and lists them by it, so a series dated two
+-- years back would be recorded and pruned in the same breath.
 local function subnew_bars(n, changes)
-    local rows, cur = {}, 100
+    local rows, cur, last = {}, 100, util_today()
     for i = 1, n do
         for _, ch in ipairs(changes or {}) do
             if ch.from == i then cur = ch.close end
         end
-        rows[i] = { date = util_date_add_days('2024-01-01', i), open = i == 1 and 100 or cur,
+        rows[i] = { date = util_date_add_days(last, i - n), open = i == 1 and 100 or cur,
                     close = cur, high = cur + 1, low = cur - 1 }
     end
     return rows
@@ -1833,6 +1836,73 @@ local function test_subnew()
         { universe = 'market', list_window = '240,abc' }).error.code, 'bad_request')
     eq('and one out of range', api_call('subnew.backtest',
         { universe = 'market', drop = '0,50' }).error.code, 'bad_request')
+
+    section('subnew: 增量推送 (engine/signals.lua, shared with breakout)')
+    -- 300002 crossed the line on day 70 of an 80-day series — 10 trading days
+    -- ago, so it needs a wide enough `days` to still count as "just now".
+    __signals_set_daily(true)
+    local pushes = {}
+    __net_set_transport(function(url, opts)
+        if url:find('wecom.test', 1, true) then
+            pushes[#pushes + 1] = util_json_decode(opts.body).markdown.content
+            return { status = 200, body = '{"errcode":0,"errmsg":"ok"}' }
+        end
+        return nil, 'no network expected: ' .. tostring(url)
+    end)
+    __notify_set_channels({ { kind = 'wecom', name = '企业微信', conf = { url = 'https://wecom.test/send?key=k' } } })
+
+    -- breakout's own entries, from its section above, are still in the same
+    -- store: recording subnew's must leave them exactly as they were.
+    local breakout_before = api_call('signals.list', { rule = 'breakout' }).data.count
+    local kept = api_call('subnew.scan', { universe = 'market', limit = 6000, offline = true,
+        record = true, days = 15 })
+    check('the scan runs and records', kept.ok, kept.error and kept.error.message)
+    eq('a scan of the rule as configured keeps what it found',
+        kept.ok and kept.data.recorded and kept.data.recorded.added, 1)
+    sched_wait_until(function() return #pushes > 0 end, 3000)
+    check('and the new one is pushed, in subnew\'s own wording',
+        pushes[1] and pushes[1]:find('次新股，跌破首日开盘价', 1, true)
+        and pushes[1]:find('新芽软件', 1, true) and pushes[1]:find('跌幅', 1, true), pushes[1])
+    eq('found again, it is not kept twice', api_call('subnew.scan', { universe = 'market', limit = 6000,
+        offline = true, record = true, days = 15 }).data.recorded.added, 0)
+
+    local list = api_call('signals.list', { rule = 'subnew' })
+    check('signals.list can be narrowed to one rule', list.ok, list.error and list.error.message)
+    eq('only subnew entries come back', list.ok and list.data.count, 1)
+    eq('with the rule\'s own title', list.ok and list.data.title, '次新股，跌破首日开盘价')
+    local s1 = list.ok and list.data.items[1]
+    eq('the record is the one that fell', s1 and s1.code, '300002')
+    near('with its drop at the signal', s1 and s1.drop_pct, -70, 1e-9)
+    eq('breakout\'s own record is untouched by it',
+        api_call('signals.list', { rule = 'breakout' }).data.count, breakout_before)
+    -- A rule that has not run has NO last_run — not the whole per-rule table,
+    -- which a client reads as that rule's own summary and renders as blanks.
+    local never = api_call('signals.list', { rule = 'breakout' }).data.last_run
+    check('a rule that has not run has no last_run of its own',
+        never == nil or never.at ~= nil, util_json_encode(never))
+    local ran = api_call('signals.list', { rule = 'subnew' }).data.last_run
+    eq('the rule that did run has its own flat summary, not everyone\'s', ran and ran.source, 'web')
+    eq('counted over the same universe it scanned', ran and ran.checked, 3)
+
+    -- The digest itself, formatted directly: each rule's own wording, one
+    -- disclaimer shared by every rule's block rather than one per rule.
+    local day = util_today()
+    local mixed = report_signals_brief({
+        { rule = 'breakout', code = '600009', name = '甲公司', signal_date = day, signal_close = 10,
+          above = 3, roe = 20 },
+        { rule = 'subnew', code = '300002', name = '新芽软件', signal_date = day, signal_close = 30,
+          drop_pct = -70, age = 70, roe = 19.31 },
+    }, { max = 10 })
+    check('a mixed digest gives each rule its own wording',
+        mixed and mixed:find('突破横盘周线', 1, true) and mixed:find('高出均线', 1, true)
+        and mixed:find('次新股，跌破首日开盘价', 1, true) and mixed:find('跌幅 ', 1, true), mixed)
+    eq('with the disclaimer said once, not once per rule',
+        select(2, (mixed or ''):gsub('是价格信号，不是结论', '')), 1)
+
+    signals_mark(signals_pending(), 'skipped')
+    __notify_set_channels(nil)
+    __net_set_transport(nil)
+    __signals_set_daily(false)
 end
 
 local function test_review()
@@ -2140,7 +2210,7 @@ local function test_market()
     local kept = scan_of({ days = 5, record = true })
     eq('a scan of the rule as configured keeps what it found', kept.recorded and kept.recorded.added, 1)
     sched_wait_until(function() return #pushes > 0 end, 3000)
-    check('and the new one is pushed', pushes[1] and pushes[1]:find('新突破 1 只', 1, true)
+    check('and the new one is pushed', pushes[1] and pushes[1]:find('新发现 1 只', 1, true)
         and pushes[1]:find('甲公司', 1, true), pushes[1])
     eq('found again, it is not kept twice', scan_of({ days = 5, record = true }).recorded.added, 0)
     local tried = scan_of({ days = 5, record = true, above_pct = 2 })
@@ -2161,9 +2231,9 @@ local function test_market()
     seed('300002', { 100, 100, 100, 104 })
     pushes = {}
     local run = api_call('alerts.run')
-    check('the check runs the rule', run.ok and run.data.signals ~= nil,
+    check('the check runs every built-in rule', run.ok and run.data.signals and run.data.signals.breakout ~= nil,
         run.ok and util_json_encode(run.data.problems) or (run.error and run.error.message))
-    eq('and keeps the one new find', run.ok and run.data.signals and run.data.signals.added, 1)
+    eq('and keeps the one new find', run.ok and run.data.signals.breakout and run.data.signals.breakout.added, 1)
     local body = pushes[#pushes] or ''
     check('which is what the push carries', body:find('乙公司', 1, true), body)
     check('and nothing it carried before', not body:find('甲公司', 1, true), body)
@@ -2203,7 +2273,7 @@ local function test_market()
 
     -- A wider window adds older breakouts after newer ones; the record still
     -- reads by signal day.
-    signals_record({ configured = true, checked = 1, days = 10, hits = { {
+    signals_record('breakout', { configured = true, checked = 1, days = 10, hits = { {
         code = '600002', name = '丙公司', date = util_date_add_days(today, -9), close = 10,
         last_close = 11, last_date = today } } }, 'test')
     local ordered = signals_list({}).items

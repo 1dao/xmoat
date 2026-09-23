@@ -1,49 +1,97 @@
--- engine/signals.lua — what the built-in rule found, kept.
+-- engine/signals.lua — what the built-in rules found, kept.
 --
 -- Exports: signals_load, signals_save, signals_record, signals_list,
 --          signals_pending, signals_mark, signals_price_updater, signals_run,
---          signals_daily, __signals_set_daily
+--          signals_rule_ids, signals_daily, __signals_set_daily
 --
--- A scan answers "who broke out just now" and forgets. Kept, the same answers
+-- A scan answers "who fired just now" and forgets. Kept, the same answers
 -- become a record that can be checked against what happened next: when each
 -- stock was found, at what price, and how far it has gone since. That is the
 -- only honest test of a rule after it was fitted — the future it did not see.
 --
--- WHAT GOES IN. Only the rule as configured (strategy_scan says whether a run
--- was that, as `configured`): a variation being tried out on the screen page
--- would mix two rules in one record. One entry per first-day breakout, by
--- stock and signal day, so running twice, or with overlapping windows, adds
--- nothing twice.
+-- ONE STORE, EVERY RULE. `RULES` below is the one place a rule's daily-push
+-- wiring lives: how to run its market-wide scan, which field of that result
+-- is "what to record" (a rule's scan may answer a different question too —
+-- subnew.scan's own `hits` are "who is down right now", not "who just
+-- crossed", which is `events`), which of its fields are worth keeping, and
+-- its own definition version (so a later change to the rule's meaning drops
+-- the old entries rather than mixing two rules' numbers under one id). Adding
+-- a rule here is the only change this file needs; storage, pushing, pruning
+-- and the record's own definition-version guard are all shared.
 --
--- TWO PRICES, because a breakout can be found days after it happened (the
--- host was off, or the window is several days): the signal day's close, and
--- the last close when it was added. "Since the signal" is the rule's own
--- result; "since it was added" is what acting on the list would have got.
--- The latest close is kept current by every scan that reads the bars anyway.
+-- WHAT GOES IN. Only a rule as configured (its scan says whether a run was
+-- that, as `configured`): a variation being tried out on the screen page
+-- would mix two parameter sets in one record. One entry per rule, stock and
+-- signal day, so running twice, or with overlapping windows, adds nothing
+-- twice — ids are namespaced by rule (`rule|code|date`), so two rules firing
+-- on the same stock the same day are two entries, not a collision.
+--
+-- TWO PRICES, because a signal can be found days after it happened (the host
+-- was off, or the window is several days): the signal day's close, and the
+-- last close when it was added. "Since the signal" is the rule's own result;
+-- "since it was added" is what acting on the list would have got. The latest
+-- close is kept current by every scan that reads the bars anyway.
 --
 -- PUSHING follows the alert log: `pushed` is false until a digest carrying
 -- it reached a channel, 'skipped' when none was configured, 'failed' after
 -- MAX_ATTEMPTS refusals. So each push carries only what is new. 'held' is a
--- signal on a day the market index was not in its 多头 state while the rule
--- asks for that (BREAKOUT_BULL_ONLY): kept, with the day's `regime`, so the
--- record can later say whether the switch was worth it — never pushed.
+-- signal a rule itself asks to keep back (breakout: the market index was not
+-- in its 多头 state while BREAKOUT_BULL_ONLY is on) — kept, never pushed.
 --
 -- Stored as data/signals.json, newest first, pruned to SIGNALS_KEEP_DAYS.
 
 local MAX_ATTEMPTS = 3
-local RULE = 'breakout'
--- Which definition of the rule an entry was found by. 1 was "the 40-day
--- average flat over five weeks, close 3% above it", which let through prices
--- swinging 20% around a flat average and ran behind the market; 2 is a real
--- base (the price within 10% for eight weeks) and a cross of the 10-week line;
--- 3 adds the stock's own monthly trend. Entries of another definition are
--- dropped on load: two rules in one record say nothing about either.
-local DEF = backtest_breakout_version
 
-local doc = nil           -- { version = 1, seq = n, items = {...}, last_run = {...} }
+-- opts passed to `scan` always carries `on_bars`, built once per run so every
+-- rule's scan updates the SAME kept entries' latest prices off the bars it
+-- reads anyway, rather than each rule re-reading the whole market's bars a
+-- second time just for that. An ARRAY, not a keyed table: order here is the
+-- order the daily check and 'signals.run' run rules in, and it is what
+-- signals_rule_ids() hands a client — genuinely the only place to touch for
+-- one more rule.
+local RULES = {
+    { id = 'breakout',
+      def = backtest_breakout_version,
+      title = function() local r = strategy_rules()[1]; return r and r.title end,
+      hits_field = 'hits',
+      scan = function(opts)
+          return strategy_scan({ universe = 'market', limit = 6000,
+              days = math.max(1, math.min(cfg_int('SIGNALS_DAYS', 3), 20)),
+              on_bars = opts.on_bars })
+      end,
+      fields = function(h) return { ma = h.ma, above = h.above, width = h.width, day_gain = h.day_gain,
+                                    regime = h.regime } end,
+      held = function(h) return h.held end },
+    { id = 'subnew',
+      def = subnew_def_version,
+      title = function() return '次新股，跌破首日开盘价' end,
+      -- subnew.scan answers two questions on one pass of the bars: `hits` is
+      -- who is down enough RIGHT NOW (the web card's own question), `events`
+      -- is who just CROSSED the line within `days` — the one worth a push,
+      -- the same unit breakout's own `hits` already are.
+      hits_field = 'events',
+      scan = function(opts)
+          return subnew_scan({ universe = 'market', limit = 6000,
+              days = math.max(1, math.min(cfg_int('SIGNALS_DAYS', 3), 20)),
+              on_bars = opts.on_bars })
+      end,
+      fields = function(h) return { age = h.age, first_open = h.first_open, line = h.line,
+                                    drop_pct = h.drop_pct } end,
+      held = function(h) return false end },
+}
+local BY_ID = {}
+for _, r in ipairs(RULES) do BY_ID[r.id] = r end
+
+function g_exports.signals_rule_ids()
+    local out = {}
+    for _, r in ipairs(RULES) do out[#out + 1] = r.id end
+    return out
+end
+
+local doc = nil           -- { version = 1, seq = n, items = {...}, last_run = { [rule] = {...} } }
 local daily_override = nil
 
-local function empty() return { version = 1, seq = 0, items = {} } end
+local function empty() return { version = 1, seq = 0, items = {}, last_run = {} } end
 
 function g_exports.signals_load()
     local loaded, err = store_load('signals')
@@ -54,14 +102,22 @@ function g_exports.signals_load()
     end
     doc = loaded
     doc.seq = tonumber(doc.seq) or #doc.items
-    local kept, dropped = {}, 0
+    -- Before rules were namespaced, last_run was one flat object ({at=...}),
+    -- not one per rule; that shape means nothing keyed by a rule that did not
+    -- exist yet, so it starts over rather than being misread as one rule's.
+    if type(doc.last_run) ~= 'table' or doc.last_run.at ~= nil then doc.last_run = {} end
+    local kept, dropped = {}, {}
     for _, s in ipairs(doc.items) do
-        if s.def == DEF then kept[#kept + 1] = s else dropped = dropped + 1 end
+        local R = BY_ID[s.rule]
+        if R and s.def == R.def then kept[#kept + 1] = s
+        else dropped[s.rule] = (dropped[s.rule] or 0) + 1 end
     end
-    if dropped > 0 then
-        doc.items, doc.last_run = kept, nil
-        cfg_log_info('signals: %d entries of an earlier definition of the rule dropped', dropped)
+    for rule, n in pairs(dropped) do
+        doc.last_run[rule] = nil
+        cfg_log_info('signals: %d %s entr%s of an earlier definition dropped', n, tostring(rule),
+            n == 1 and 'y' or 'ies')
     end
+    doc.items = kept
     return true
 end
 
@@ -74,7 +130,7 @@ function g_exports.signals_save()
 end
 
 -- Drop what is older than the record keeps. By signal day, so a stock found
--- late still leaves when its breakout is that old.
+-- late still leaves when its signal is that old.
 local function prune()
     local keep = cfg_int('SIGNALS_KEEP_DAYS', 180)
     if keep <= 0 then return end
@@ -84,10 +140,11 @@ local function prune()
     end
 end
 
--- A function for strategy_scan's on_bars: it moves each kept signal's latest
--- close to the newest bar read. Reading five thousand series once is the
--- expensive part of a scan; doing it a second time for the record would be
--- the same cost again.
+-- A function for a rule's scan `on_bars`: it moves each kept signal's latest
+-- close to the newest bar read, by code — the same for every rule, since a
+-- stock's price does not belong to one rule. Reading five thousand series
+-- once is the expensive part of a scan; doing it again for the record would
+-- be the same cost again.
 function g_exports.signals_price_updater()
     local by_code = {}
     for _, s in ipairs(doc.items) do
@@ -106,30 +163,33 @@ function g_exports.signals_price_updater()
     end
 end
 
--- Keep the new ones from a scan of the rule as configured. `source` says what
--- ran it ('daily', 'web', 'cli'). Returns how many were added, and how many of
--- those are held back by the market switch. Saves either way: the scan may
--- have moved the latest closes.
-function g_exports.signals_record(scan, source)
+-- Keep the new ones from a scan of `rule` as configured. `source` says what
+-- ran it ('daily', 'web', 'cli'). Returns how many were added, and how many
+-- of those are held back (the rule's own switch). Saves either way: the scan
+-- may have moved the latest closes.
+function g_exports.signals_record(rule, scan, source)
+    local R = BY_ID[rule]
+    if not R then return 0, 0 end
     local known, added = {}, {}
     for _, s in ipairs(doc.items) do known[s.id] = true end
     local now = util_now_iso()
     if type(scan) == 'table' and scan.configured then
-        for _, h in ipairs(scan.hits or {}) do
-            local id = RULE .. '|' .. h.code .. '|' .. tostring(h.date)
+        for _, h in ipairs(scan[R.hits_field] or {}) do
+            local id = rule .. '|' .. h.code .. '|' .. tostring(h.date)
             if not known[id] then
                 known[id] = true
                 doc.seq = doc.seq + 1
-                added[#added + 1] = {
-                    seq = doc.seq, id = id, rule = RULE, def = DEF,
+                local item = {
+                    seq = doc.seq, id = id, rule = rule, def = R.def,
                     code = h.code, name = h.name, industry = h.industry,
                     signal_date = h.date, signal_close = h.close,
-                    ma = h.ma, above = h.above, width = h.width, day_gain = h.day_gain,
                     added_at = now, added_date = h.last_date, added_close = h.last_close,
                     last_date = h.last_date, last_close = h.last_close,
                     pe_ttm = h.pe_ttm, pb = h.pb, roe = h.roe, market_cap = h.market_cap,
-                    regime = h.regime, source = source, pushed = h.held and 'held' or false,
+                    source = source, pushed = R.held(h) and 'held' or false,
                 }
+                for k, v in pairs(R.fields(h)) do item[k] = v end
+                added[#added + 1] = item
             end
         end
     end
@@ -140,13 +200,14 @@ function g_exports.signals_record(scan, source)
         if s.pushed == 'held' then held = held + 1 end
     end
     if type(scan) == 'table' and scan.configured then
-        doc.last_run = { at = now, source = source, checked = scan.checked,
-                         found = #(scan.hits or {}), added = #added, held = held, days = scan.days,
-                         regime = scan.regime and scan.regime.state }
+        doc.last_run[rule] = { at = now, source = source, checked = scan.checked,
+                               found = #(scan[R.hits_field] or {}), added = #added, held = held,
+                               days = scan.days or (scan.params and scan.params.days),
+                               regime = scan.regime and scan.regime.state }
     end
     prune()
     signals_save()
-    if #added > 0 then cfg_log_info('signals: %d new from %s', #added, tostring(source)) end
+    if #added > 0 then cfg_log_info('signals: %d new %s from %s', #added, rule, tostring(source)) end
     return #added, held
 end
 
@@ -158,8 +219,11 @@ end
 
 -- The record by signal day, newest first, with the two gains worked out on
 -- read. Stored order is the order things were ADDED, and a wider window adds
--- older breakouts after newer ones; within one day, the order the scan gave.
--- opts = { days = 30 (by signal day), limit = 500 }
+-- older signals after newer ones; within one day, the order the scan gave.
+-- opts = { days = 30 (by signal day), limit = 500, rule? }: `rule` narrows to
+-- one rule's entries (and its own last_run/title); left out, every rule's
+-- entries come back mixed, newest first, each carrying its own `rule` field,
+-- and `last_run` is the per-rule table rather than one summary.
 function g_exports.signals_list(opts)
     opts = opts or {}
     local days = opts.days or 30
@@ -167,7 +231,9 @@ function g_exports.signals_list(opts)
     local cut = util_date_add_days(util_today(), -days)
     local within = {}
     for _, s in ipairs(doc.items) do
-        if tostring(s.signal_date) >= cut then within[#within + 1] = s end
+        if (not opts.rule or s.rule == opts.rule) and tostring(s.signal_date) >= cut then
+            within[#within + 1] = s
+        end
     end
     table.sort(within, function(a, b)
         if a.signal_date ~= b.signal_date then return tostring(a.signal_date) > tostring(b.signal_date) end
@@ -181,16 +247,22 @@ function g_exports.signals_list(opts)
         row.since_added_pct = pct(s.last_close, s.added_close)
         out[#out + 1] = row
     end
-    local rule = strategy_rules()[1]
+    local R = opts.rule and BY_ID[opts.rule]
+    -- Not `opts.rule and doc.last_run[opts.rule] or doc.last_run`: a rule that
+    -- has never run has no entry, and that falls through to the whole
+    -- per-rule table — which a client then reads as one rule's summary.
+    local last_run = doc.last_run
+    if opts.rule then last_run = doc.last_run[opts.rule] end
     return {
-        rule = RULE, title = rule and rule.title, days = days,
+        rule = opts.rule, title = R and R.title() or nil, days = days,
         total = total, count = #out, items = util_json_array(out),
-        last_run = doc.last_run,
+        last_run = last_run,
         daily = signals_daily(),
     }
 end
 
--- Waiting to be pushed, oldest first.
+-- Waiting to be pushed, oldest first, every rule mixed — a digest is one
+-- message regardless of which rule found what.
 function g_exports.signals_pending()
     local out = {}
     for i = #doc.items, 1, -1 do
@@ -217,8 +289,10 @@ function g_exports.signals_mark(list, how)
     signals_save()
 end
 
--- Whether the daily check runs the rule. Tests turn it off for every check
--- but their own: a whole-market scan is not what a test of the watchlist asks.
+-- Whether the daily check runs the built-in rules at all. Tests turn it off
+-- for every check but their own: a whole-market scan is not what a test of
+-- the watchlist asks. One switch for every rule, not one per rule — a check
+-- either does this work or it does not.
 function g_exports.signals_daily()
     if daily_override ~= nil then return daily_override end
     return cfg_bool('SIGNALS_DAILY', true)
@@ -228,12 +302,14 @@ function g_exports.__signals_set_daily(v)
     daily_override = v
 end
 
--- COROUTINE-ONLY. The daily run: the rule as configured over the whole
--- market, the new finds kept. A few days of window, so a check that was
+-- COROUTINE-ONLY. The daily run for one rule: it as configured over the
+-- whole market, the new finds kept. A few days of window, so a check that was
 -- missed (the host was off, a holiday was mistaken for a trading day) still
--- finds what broke out meanwhile — kept once each, whatever the overlap.
+-- finds what fired meanwhile — kept once each, whatever the overlap.
 -- Returns the scan's summary with `added`, or nil plus (code, message).
-function g_exports.signals_run(source)
+function g_exports.signals_run(rule, source)
+    local R = BY_ID[rule]
+    if not R then return nil, 'bad_request', '未知规则：' .. tostring(rule) end
     local status = market_status()
     if not status or not status.ready then
         -- The universe is the snapshot's list of stocks. Without one there is
@@ -241,13 +317,11 @@ function g_exports.signals_run(source)
         local got, _, err = market_refresh()
         if not got then return nil, 'upstream', '没有全市场快照，抓取也失败了：' .. tostring(err) end
     end
-    local res, ecode, emsg = strategy_scan({
-        universe = 'market', limit = 6000,
-        days = math.max(1, math.min(cfg_int('SIGNALS_DAYS', 3), 20)),
-        on_bars = signals_price_updater(),
-    })
+    local res, ecode, emsg = R.scan({ on_bars = signals_price_updater() })
     if not res then return nil, ecode, emsg end
-    local added, held = signals_record(res, source or 'daily')
-    return { checked = res.checked, found = #res.hits, added = added, held = held, days = res.days,
+    local added, held = signals_record(rule, res, source or 'daily')
+    local hits = res[R.hits_field] or {}
+    return { rule = rule, checked = res.checked, found = #hits, added = added, held = held,
+             days = res.days or (res.params and res.params.days),
              regime = res.regime and res.regime.state, fetch = res.fetch, params = res.params }
 end

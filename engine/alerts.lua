@@ -169,7 +169,7 @@ function g_exports.alerts_flush(opts)
             -- something, or something could not be fetched, or the review was
             -- asked for every trading day.
             local body = table.concat(tail, '\n\n')
-            msg = { title = found and string.format('xmoat 新突破 %d 只', #fresh)
+            msg = { title = found and string.format('xmoat 新信号 %d 只', #fresh)
                         or trouble and 'xmoat 检查：有数据没取到'
                         or 'xmoat 收盘复盘 ' .. tostring(opts.review.as_of or util_today()),
                     markdown = body, text = body, events = {} }
@@ -281,19 +281,27 @@ function g_exports.alerts_run()
             end
         end
 
-        -- The built-in rule over the whole market, after the close like the
-        -- rest of the check. What it finds is new once; only the new ones go
-        -- into this push. A failure is a missing section, not a missing check.
-        local signals, signals_held
+        -- Every built-in rule over the whole market, after the close like the
+        -- rest of the check. What each finds is new once; only the new ones
+        -- go into this push. One rule's failure is a missing section for that
+        -- rule, not a missing check — the others still run.
+        local signals, signals_held = {}, nil
         if signals_daily() then
-            local sok, sres, _, serr = pcall(signals_run, 'daily')
-            if sok and sres then
-                signals = sres
-                signals_held = { count = sres.held or 0, state = sres.regime }
-            else
-                local why = sok and serr or sres
-                cfg_log_warn('built-in rule failed: %s', tostring(why))
-                problems[#problems + 1] = { kind = 'signals', error = tostring(why) }
+            for _, rule in ipairs(signals_rule_ids()) do
+                local sok, sres, _, serr = pcall(signals_run, rule, 'daily')
+                if sok and sres then
+                    signals[rule] = sres
+                    -- Only breakout has a market-switch hold-back today; the
+                    -- tail line in alerts_flush is written for one rule's
+                    -- worth, so only the one that can produce it sets this.
+                    if rule == 'breakout' then
+                        signals_held = { count = sres.held or 0, state = sres.regime }
+                    end
+                else
+                    local why = sok and serr or sres
+                    cfg_log_warn('built-in rule (%s) failed: %s', rule, tostring(why))
+                    problems[#problems + 1] = { kind = 'signals', rule = rule, error = tostring(why) }
+                end
             end
         end
 
@@ -311,9 +319,13 @@ function g_exports.alerts_run()
         cfg_log_error('alerts run raised: %s', tostring(result))
         return nil, 'internal', '检查时出错'
     end
+    local rule_summary = {}
+    for _, rule in ipairs(signals_rule_ids()) do
+        local r = result.signals[rule]
+        if r then rule_summary[#rule_summary + 1] = string.format('%s: %d found, %d new', rule, r.found, r.added) end
+    end
     cfg_log_system('check finished: %d stock(s), %d new alert(s), %d pushed, %d data problem(s)%s',
         #result.refreshed, result.new_events, result.push.sent or 0, #result.problems,
-        result.signals and string.format(', rule: %d found, %d new', result.signals.found,
-            result.signals.added) or '')
+        #rule_summary > 0 and (', ' .. table.concat(rule_summary, '; ')) or '')
     return result
 end

@@ -1189,7 +1189,7 @@
     else results.append(h('p', { class: 'muted', text:
       '点“筛选全市场”，在全部 A 股（不含 ST）里找刚刚首次突破的股票。用默认参数时，结果会记进下面的信号记录。' }));
 
-    const record = signalsCard(token);
+    const record = signalsCard(token, rule.id);
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
@@ -1320,10 +1320,12 @@
 
   // ── 次新股: recently listed, down from its first day ─────────────────────────
   //
-  // Structurally its own thing, not a breakout variant: no均线/横盘 fields, no
-  // signal record, no daily push. Its own card, its own scan, and — because
-  // "how many weeks, how big a drop" is exactly the question a grid answers —
-  // its own backtest, right here rather than only through the API.
+  // Structurally its own thing, not a breakout variant: no均线/横盘 fields, its
+  // own axes. Otherwise the same shape as breakout's card — a scan of the
+  // rule as configured records and pushes (engine/signals.lua), and it gets
+  // its own signal record below — plus, because "how many weeks, how big a
+  // drop" is exactly the question a grid answers, its own backtest here
+  // rather than only through the API.
 
   const SUBNEW_KEY = 'xmoat.subnew';
 
@@ -1348,7 +1350,10 @@
 
     const results = h('section', { class: 'card' });
     results.append(h('p', { class: 'muted', text:
-      '点“筛选全市场”，在全部 A 股里找上市不久、相对首日开盘价已经跌了这么多的股票。' }));
+      '点“筛选全市场”，在全部 A 股里找上市不久、相对首日开盘价已经跌了这么多的股票。用默认参数时，' +
+      '结果会记进下面的信号记录。' }));
+
+    const record = signalsCard(token, 'subnew');
 
     form.addEventListener('submit', async e => {
       e.preventDefault();
@@ -1357,11 +1362,13 @@
       storage(s => s.setItem(SUBNEW_KEY, JSON.stringify({ list_weeks, drop })));
       await busy(run, '全市场扫描中…', async () => {
         const res = await api('GET', '/api/v1/subnew/scan?' + new URLSearchParams({
-          universe: 'market', limit: '6000',
+          universe: 'market', limit: '6000', record: 'true',
           list_window: String(Math.round(list_weeks * 5)), drop: String(drop),
         }).toString());
         if (stale(token)) return;
         showSubnewScan(results, res);
+        // New finds, and the latest closes of the old ones, which the scan moved.
+        if (res.recorded) record.reload();
       });
     });
     reset.addEventListener('click', () => {
@@ -1380,6 +1387,7 @@
           '“买同一批次新股但不要求它跌”的基准比；胜率没有明显更高，就说明这个跌幅条件没加东西。' })),
       results,
       subnewBacktestCard(),
+      record.node,
     ];
   }
 
@@ -1412,6 +1420,11 @@
       }
     }
     const lines = [];
+    if (res.recorded) {
+      const rc = res.recorded;
+      lines.push(rc.note || (rc.added === 0 ? '都已在信号记录里，没有新的。'
+        : `新记入信号记录 ${rc.added} 只` + (rc.pushing ? '；正在推送。' : '；没有配置推送渠道，所以不推送。')));
+    }
     if (isNum(f.total)) {
       lines.push(`行情：本地 ${f.cached} 只，新抓 ${f.fetched} 只` +
         (f.failed && f.failed.length ? `，失败 ${f.failed.length} 只` : '') +
@@ -1506,13 +1519,15 @@
   const SIGNAL_WINDOWS = [[7, '近一周'], [30, '近一月'], [90, '近三月']];
   const RUN_SOURCE = { daily: '收盘后的检查', web: '网页', manual: '手动运行' };
 
-  function signalsCard(token) {
+  // `rule` narrows the record to this one rule's tab — each rule keeps its
+  // own signal history, so 内置规则1's card never shows 内置规则2's finds.
+  function signalsCard(token, rule) {
     const box = h('section', { class: 'card' });
     let days = Number(storage(s => s.getItem(SIGNAL_DAYS_KEY))) || 30;
 
     async function load() {
       let res;
-      try { res = await api('GET', '/api/v1/signals?days=' + days); }
+      try { res = await api('GET', '/api/v1/signals?rule=' + rule + '&days=' + days); }
       catch (e) {
         if (stale(token)) return;
         box.textContent = '';

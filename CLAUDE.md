@@ -203,12 +203,39 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   a cache prefetched at 400 days once passed for "five years" because the
   report showed the EARLIEST first day — `span` now gives the median), and
   signals must be compared with the baseline year by year, not pooled.
-- `engine/signals.lua` keeps what the rule as configured found
-  (`scan.configured`): one entry per stock and signal day, with the signal
-  close AND the close when it was added, prices moved on by any scan
-  (`on_bars`). The daily check runs it (`SIGNALS_DAILY`) and new entries ride
-  in the digest once, by the same pushed flag as alerts. Tests switch the
-  daily run off (`__signals_set_daily`) except in their own section.
+- `engine/signals.lua` keeps what a rule as configured found
+  (`scan.configured`): one entry per RULE, stock and signal day, with the
+  signal close AND the close when it was added, prices moved on by any scan
+  (`on_bars`, shared — a stock's price does not belong to one rule). The daily
+  check runs every rule (`SIGNALS_DAILY`, one switch for all of them) and new
+  entries ride in the digest once, by the same pushed flag as alerts. Tests
+  switch the daily run off (`__signals_set_daily`) except in their own section.
+- Its `RULES` array is the ONE place a rule's daily-push wiring lives: how to
+  scan, which field of that result is what to record (`hits_field` — subnew's
+  own `hits` are "who is down now", `events` is "who just crossed"), which of
+  its fields to keep, and its `def` version (bump it and old entries of that
+  rule are dropped on load rather than mixed in). Order there is the order the
+  check runs them and what `signals_rule_ids()` gives a client; adding a rule
+  is one entry there plus one line in the web page's `BUILTIN_TABS`.
+
+## 次新股 (internal rule 1)
+
+- `engine/subnew.lua`: listed within `SUBNEW_LIST_WINDOW` trading days and the
+  close `SUBNEW_DROP_PCT`% under its FIRST DAY'S OPEN. `subnew_signals` fires
+  on the day the close first CROSSES under that line (cooldown, like breakout);
+  `subnew_state` answers "is it down enough right now".
+- px[1].open is the listing open ONLY when the series is the whole history.
+  A stock older than `QUOTE_MAX_DAYS` has a px[1] that is a window edge, not an
+  IPO, so anything at or near the cap is skipped — which also bounds how far
+  back the rule can be tested (1200 days ≈ 4.8 years; raise it to see more).
+- Defaults 300 days / 60% come from the grid (`subnew.backtest`, list_window ×
+  drop, pooled): the DROP threshold is what works, monotonically across every
+  window, and past 60% the sample collapses (70% is 8–59 signals, 80% nearly
+  none). Not verified year by year, and the sample sits mostly after 2023 —
+  treat it as one market episode until a later run says otherwise.
+- Its baseline is "the same young stocks, any day in the same window" — buying
+  a 次新股 WITHOUT requiring the fall. Against "any stock any day" the rule
+  would look good for the wrong reason.
 
 ## Screening
 

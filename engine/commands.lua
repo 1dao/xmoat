@@ -849,7 +849,7 @@ local function install_strategy()
             if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
             if keep then
                 if res.configured then
-                    local added, held = signals_record(res, 'web')
+                    local added, held = signals_record('breakout', res, 'web')
                     res.recorded = { added = added, held = held, pushing = #notify_channels() > 0 }
                     if added > held then alerts_flush_later() end
                 else
@@ -912,8 +912,11 @@ local function install_strategy()
         summary = '扫描次新股：上市一年内、相对首日开盘价跌了 drop% 以上的股票',
         params = (function()
             local p = subnew_universe_params()
-            p.list_window = { type = 'integer', doc = '上市多少个交易日以内算次新股，默认 SUBNEW_LIST_WINDOW（240，约一年）' }
-            p.drop = { type = 'number', doc = '相对首日开盘价至少跌多少 %，默认 SUBNEW_DROP_PCT（50）' }
+            p.list_window = { type = 'integer', doc = '上市多少个交易日以内算次新股，默认 SUBNEW_LIST_WINDOW（300，约 60 周）' }
+            p.drop = { type = 'number', doc = '相对首日开盘价至少跌多少 %，默认 SUBNEW_DROP_PCT（60）' }
+            p.days = { type = 'integer', doc = '最近几个交易日内首次跌破的都算，默认只看当日' }
+            p.record = { type = 'boolean',
+                         doc = '按内置默认参数扫描时，把新发现的记入信号记录（signals.list?rule=subnew）并推送' }
             return p
         end)(),
         handler = function(p)
@@ -929,10 +932,32 @@ local function install_strategy()
             if p.drop and (p.drop < 1 or p.drop > 99) then
                 return nil, 'bad_request', 'drop 应在 1 到 99 之间'
             end
+            if p.days and (p.days < 1 or p.days > 20) then
+                return nil, 'bad_request', 'days 应在 1 到 20 之间'
+            end
             local opts = subnew_common(p)
-            opts.list_window, opts.drop_pct = p.list_window, p.drop
+            opts.list_window, opts.drop_pct, opts.days = p.list_window, p.drop, p.days
+            -- Same rule as strategy.scan: a scan of the rule as configured over
+            -- the whole market is the same thing the daily check runs, so it
+            -- keeps its finds and the new ones are pushed; a variation being
+            -- tried out is only shown.
+            local keep = p.record and opts.universe == 'market'
+            if keep then
+                opts.days = opts.days or math.max(1, math.min(cfg_int('SIGNALS_DAYS', 3), 20))
+                opts.on_bars = signals_price_updater()
+            end
             local res, ecode, emsg = subnew_scan(opts)
             if not res then return nil, ecode or 'internal', emsg or '扫描失败' end
+            if keep then
+                if res.configured then
+                    local added, held = signals_record('subnew', res, 'web')
+                    res.recorded = { added = added, held = held, pushing = #notify_channels() > 0 }
+                    if added > held then alerts_flush_later() end
+                else
+                    signals_save()
+                    res.recorded = { added = 0, note = '参数和内置默认不同，这次的结果不记入信号记录' }
+                end
+            end
             return res
         end,
     })
@@ -979,10 +1004,12 @@ local function install_strategy()
 
     api_define({
         name = 'signals.list', method = 'GET', path = '/api/v1/signals',
-        summary = '内置规则的信号记录：每只首日突破的发现时间、价格，以及之后涨了多少',
+        summary = '内置规则的信号记录：每只发现的时间、价格，以及之后涨了多少',
         params = {
             days = { type = 'integer', doc = '最近多少天的信号（按信号日），默认 30' },
             limit = { type = 'integer', doc = '最多返回多少条，默认 500' },
+            rule = { type = 'string', enum = { 'breakout', 'subnew' },
+                     doc = '只看某条内置规则；不给就每条规则都有，混在一起' },
         },
         handler = function(p)
             if p.days and (p.days < 1 or p.days > 3650) then
@@ -991,18 +1018,35 @@ local function install_strategy()
             if p.limit and (p.limit < 1 or p.limit > 5000) then
                 return nil, 'bad_request', 'limit 应在 1 到 5000 之间'
             end
-            return signals_list({ days = p.days, limit = p.limit })
+            return signals_list({ days = p.days, limit = p.limit, rule = p.rule })
         end,
     })
 
     api_define({
         name = 'signals.run', method = 'POST', path = '/api/v1/signals/run',
-        summary = '现在就按内置默认参数把全市场跑一遍，记下新发现的并推送；每日检查也做这件事',
-        handler = function()
-            local res, ecode, emsg = signals_run('manual')
-            if not res then return nil, ecode or 'internal', emsg or '运行失败' end
-            if res.added > 0 then alerts_flush_later() end
-            return res
+        summary = '现在就按内置默认参数把全市场跑一遍（每条规则都跑），记下新发现的并推送；每日检查也做这件事',
+        params = {
+            rule = { type = 'string', enum = { 'breakout', 'subnew' }, doc = '只跑某一条规则；不给就每条都跑' },
+        },
+        handler = function(p)
+            local rules = p.rule and { p.rule } or signals_rule_ids()
+            local by_rule, added, problems = {}, 0, {}
+            for _, rule in ipairs(rules) do
+                local res, ecode, emsg = signals_run(rule, 'manual')
+                if res then
+                    by_rule[rule] = res
+                    added = added + res.added
+                else
+                    problems[#problems + 1] = { rule = rule, code = ecode, message = emsg }
+                end
+            end
+            if next(by_rule) == nil then
+                local first = problems[1] or {}
+                return nil, first.code or 'internal', first.message or '运行失败'
+            end
+            if added > 0 then alerts_flush_later() end
+            return { added = added, rules = by_rule,
+                     problems = #problems > 0 and util_json_array(problems) or nil }
         end,
     })
 end

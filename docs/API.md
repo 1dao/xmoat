@@ -72,10 +72,10 @@
 | `groups.regions` | `GET /api/v1/groups/regions` | `refresh?`，`offline?` | 地域归属（31 个地域板块，约 5500 只），缓存 30 天 |
 | `strategy.scan` | `GET /api/v1/strategy/scan` | `rule?`，`ma_days?` 或 `ma_weeks?`，`flat_lookback?` 或 `flat_weeks?`，`above_pct?`，`flat_max?`，`days?`，`cooldown?`，`record?`，`codes?` / `universe?` / `limit?` | `Scan`：最近 `days` 个交易日里首次突破的股票 |
 | `strategy.rules` | `GET /api/v1/strategy/rules` | — | `Rule[]`：内置规则及其参数，默认值来自配置 |
-| `subnew.scan` | `GET /api/v1/subnew/scan` | `list_window?`，`drop?`，`codes?` / `universe?` / `limit?` | `SubnewScan`：上市 `list_window` 个交易日内、相对首日开盘价跌了 `drop%` 以上的股票 |
+| `subnew.scan` | `GET /api/v1/subnew/scan` | `list_window?`，`drop?`，`days?`，`record?`，`codes?` / `universe?` / `limit?` | `SubnewScan`：上市 `list_window` 个交易日内、相对首日开盘价跌了 `drop%` 以上的股票 |
 | `subnew.backtest` | `GET /api/v1/subnew/backtest` | `list_window?`（逗号分隔），`drop?`（逗号分隔），`horizon?`，`cooldown?`，`objective?`，`min_entries?`，`codes?` / `universe?` / `limit?` | `Sweep`：网格回测（上市天数 × 跌幅），和"买同一批次新股但不要求它跌"的基准比 |
-| `signals.list` | `GET /api/v1/signals` | `days?`（默认 30，按信号日），`limit?`（默认 500） | `SignalList`：内置规则的信号记录与之后的涨幅 |
-| `signals.run` | `POST /api/v1/signals/run` | — | 按默认参数把全市场跑一遍、记下新发现的并推送；收盘后的检查也做这件事 |
+| `signals.list` | `GET /api/v1/signals` | `days?`（默认 30，按信号日），`limit?`（默认 500），`rule?`（breakout/subnew；不给就混在一起） | `SignalList`：内置规则的信号记录与之后的涨幅 |
+| `signals.run` | `POST /api/v1/signals/run` | `rule?`（不给就每条规则都跑） | `{added, rules: {[rule]: RunSummary}, problems?}`：按默认参数把全市场跑一遍、记下新发现的并推送；收盘后的检查也做这件事 |
 | `review.daily` | `GET /api/v1/review` | `offline?`，`force?`，`top?`（默认 5） | `Review`：大盘、结构、自选三段 |
 | `review.sectors` | `GET /api/v1/review/sectors` | `kind?`（industry/concept），`offline?`，`force?` | 板块涨跌表；缓存 `REVIEW_SECTOR_TTL_MIN` 分钟 |
 | `alerts.list` | `GET /api/v1/alerts` | `code?`，`limit?`（1–500），`after_seq?` | `Alert[]`，新的在前 |
@@ -459,7 +459,19 @@ type Scan = {
 ```ts
 type SubnewScan = {
   universe: string, checked: number,
-  params: { list_window: number, drop_pct: number, list_weeks: number },
+  params: { list_window: number, drop_pct: number, list_weeks: number, days?: number },
+  configured: boolean,                      // 参数就是内置默认（只有这样的结果会被记录）
+  recorded?: { added: number, held: number,     // 带 record 且 universe=market 时
+               pushing?: boolean, note?: string },
+  events?: {                                // 只在给了 days 时有：最近 days 个交易日内
+    code: string, name?: string, industry?: string,   // 第一次跌破那条线的，每只最多一条
+    date: string, close: number,            // 信号日与当天收盘
+    age: number,                            // 信号日时上市了多少个交易日
+    first_open: number, line: number, drop_pct: number,
+    bars_ago: number,                       // 距今几个交易日
+    last_date: string, last_close: number,
+    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+  }[],
   hits: {
     code: string, name?: string, industry?: string,
     list_date: string, last_date: string, days_listed: number,  // 上市以来的交易日数
@@ -477,27 +489,40 @@ type SubnewScan = {
 
 `subnew.scan` 只看还没被 `QUOTE_MAX_DAYS` 截断的日线：一只上市已久的股票，缓存里第一天
 不是它的上市日，这样的股票被跳过，不算在 `hits` 或 `skipped` 里，只出现在 `checked` 的计数里。
+`hits` 是「现在就跌够了的」，`events` 是「最近才跌破的」——推送记的是后者，两者在同一趟
+日线上一起算出来。
 
 ```ts
 type SignalList = {
-  rule: 'breakout', title: string, days: number,
+  rule?: 'breakout' | 'subnew',             // 给了 rule 才有；不给就是各规则混在一起
+  title?: string, days: number,
   total: number, count: number,             // 这段时间里一共几条；这次返回了几条
-  daily: boolean,                           // 收盘后的检查会不会自动跑（SIGNALS_DAILY）
-  last_run?: { at: string, source: 'daily' | 'web' | 'manual', checked: number,
-               found: number, added: number, held: number, days: number, regime?: string },
+  daily: boolean,                           // 收盘后的检查会不会自动跑（SIGNALS_DAILY，所有规则共用）
+  last_run?: RunSummary | { [rule: string]: RunSummary },   // 给了 rule 是那一条的，不给是每条一份
   items: {
+    rule: 'breakout' | 'subnew',            // 哪条规则找到的
     code: string, name?: string, industry?: string,
-    signal_date: string, signal_close: number,   // 突破第一天
+    signal_date: string, signal_close: number,   // 信号第一天
     added_at: string, added_close: number,       // 记下来的时间，以及当时的最新收盘
-    last_date: string, last_close: number,       // 每次扫描顺手更新
+    last_date: string, last_close: number,       // 每次扫描顺手更新（哪条规则扫的都算）
     since_signal_pct?: number, since_added_pct?: number,   // 读取时算
-    ma?: number, above?: number, width?: number, day_gain?: number,   // 信号日的均线、高出、横盘振幅
-    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
+    // breakout 的字段：
+    ma?: number, above?: number, width?: number, day_gain?: number,
     regime?: string,                        // 信号日大盘的状态
+    // subnew 的字段：
+    age?: number, first_open?: number, line?: number, drop_pct?: number,
+    pe_ttm?: number, pb?: number, roe?: number, market_cap?: number,
     pushed: boolean | 'skipped' | 'failed' | 'held',   // held：大盘不在多头，按设置不推送
   }[],                                      // 新的在前
 }
+
+type RunSummary = { at: string, source: 'daily' | 'web' | 'manual', checked: number,
+                    found: number, added: number, held: number, days: number, regime?: string }
 ```
+
+一条推送把每条规则各自的新发现分段列出（每段最多 `SIGNALS_PUSH_MAX` 只，按 ROE），
+免责声明整条消息只说一次。收盘后的检查按 engine/signals.lua 里 `RULES` 的顺序逐条跑，
+一条规则失败只是少一段，其余照跑。
 
 ### Review
 

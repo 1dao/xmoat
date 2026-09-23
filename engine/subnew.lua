@@ -1,7 +1,7 @@
 -- engine/subnew.lua — 次新股: a stock recently listed and already beaten down.
 --
--- Exports: subnew_params, subnew_axes, subnew_signals, subnew_state,
---          subnew_scan, subnew_backtest
+-- Exports: subnew_params, subnew_axes, subnew_def_version, subnew_signals,
+--          subnew_state, subnew_scan, subnew_backtest
 --
 -- THE RULE. A newly listed stock (within `list_window` trading days of its
 -- first day) whose close has fallen `drop`% below its FIRST DAY'S OPEN. The
@@ -24,6 +24,12 @@
 -- NO LOOKAHEAD. An entry on day i reads px[1].open and px[i].close, both known
 -- on day i; the forward return is the measured outcome and nothing about it
 -- feeds the decision to enter.
+
+-- Which definition of the rule an entry (engine/signals.lua) was found by:
+-- bump this if the rule's meaning changes (what "first day" means, what
+-- counts as a cross), the same guard backtest_breakout_version gives that
+-- rule. Entries of another definition are dropped on load.
+g_exports.subnew_def_version = 1
 
 -- The rule's numbers, in one place, from config.
 function g_exports.subnew_params()
@@ -159,19 +165,25 @@ local function prefetch(list, opts)
     return res
 end
 
--- COROUTINE-ONLY. The 次新股 that are down `drop`% or more, now.
--- opts: the usual universe options, plus { list_window, drop_pct }.
+-- COROUTINE-ONLY. The 次新股 that are down `drop`% or more, now — and, when
+-- `days` is given, who just CROSSED that line within the last `days` trading
+-- days (`events`), the unit the daily push records: "down enough right now"
+-- and "just became down enough" are different questions, computed together
+-- off the same bars read rather than scanning the market twice.
+-- opts: the usual universe options, plus { list_window, drop_pct, days? }.
 function g_exports.subnew_scan(opts)
     opts = util_copy(opts)
     local d = subnew_params()
     local window = opts.list_window or d.list_window
     local drop = opts.drop_pct or d.drop_pct
+    local cooldown = opts.cooldown or d.cooldown
+    local days = opts.days and math.max(1, math.min(opts.days, 20)) or nil
 
     local list, kind = strategy_universe(opts)
     if #list == 0 then return nil, 'bad_request', '没有可用的股票（自选为空，或筛选没有结果）' end
     local fetch = prefetch(list, opts)
 
-    local hits, checked, skipped = {}, 0, {}
+    local hits, events, checked, skipped = {}, {}, 0, {}
     for i, item in ipairs(list) do
         if i % 200 == 0 then sched_sleep(1) end
         local px, why = bars_for(item.code, opts)
@@ -185,21 +197,59 @@ function g_exports.subnew_scan(opts)
                 st.pe_ttm, st.pb, st.roe, st.market_cap = item.pe_ttm, item.pb, item.roe, item.market_cap
                 hits[#hits + 1] = st
             end
+            -- subnew_signals trusts px[1].open as the listing day; subnew_state
+            -- already guards that internally, this loop must guard it itself.
+            if days and not truncated(px) then
+                local found = subnew_signals(px, { list_window = window, drop_pct = drop, cooldown = cooldown })
+                local newest
+                for _, e in ipairs(found.entries) do
+                    if e.index > #px - days and (not newest or e.index > newest.index) then newest = e end
+                end
+                if newest then
+                    local last = px[#px]
+                    events[#events + 1] = {
+                        code = item.code, name = item.name, industry = item.industry,
+                        date = newest.date, close = newest.close, age = newest.age,
+                        first_open = newest.first_open, line = newest.line, drop_pct = newest.drop_pct,
+                        bars_ago = #px - newest.index,
+                        last_date = last.date, last_close = util_num(last.close),
+                        pe_ttm = item.pe_ttm, pb = item.pb, roe = item.roe, market_cap = item.market_cap,
+                    }
+                end
+            end
         end
     end
     -- Deepest fall first: the ones that gave back the most of the listing pop.
     table.sort(hits, function(a, b) return (a.drop_pct or 0) < (b.drop_pct or 0) end)
+    table.sort(events, function(a, b)
+        if a.bars_ago ~= b.bars_ago then return a.bars_ago < b.bars_ago end
+        return (a.drop_pct or 0) < (b.drop_pct or 0)
+    end)
     for _, hit in ipairs(hits) do
         if not hit.name then
             local rec = stock_load(hit.code)
             hit.name = rec and rec.name or nil
         end
     end
+    for _, e in ipairs(events) do
+        if not e.name then
+            local rec = stock_load(e.code)
+            e.name = rec and rec.name or nil
+        end
+    end
+
+    -- The rule as configured, rather than a variation being tried out: only
+    -- that is worth keeping a record of (engine/signals.lua).
+    local configured = window == d.list_window and drop == d.drop_pct and cooldown == d.cooldown
+
     return {
         universe = kind, checked = checked, fetch = fetch,
         params = { list_window = window, drop_pct = drop,
-                   list_weeks = window / 5 },
-        hits = util_json_array(hits), skipped = util_json_array(skipped),
+                   list_weeks = window / 5, days = days },
+        configured = configured,
+        hits = util_json_array(hits),
+        events = days and util_json_array(events) or nil,
+        skipped = util_json_array(skipped),
         note = '这是筛选，不是结论：上市一年内、相对首日开盘价跌了这么多，只说明它便宜过发行时的热度，' ..
                '公司值不值得买仍要看财报、估值和检查清单。跌幅相对的是前复权后的首日开盘价。',
     }

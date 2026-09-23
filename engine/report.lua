@@ -504,15 +504,26 @@ function g_exports.report_problems_brief(problems)
     return table.concat(L, '\n')
 end
 
--- The built-in rule's new finds, for the push. A day can bring sixty of them
--- and the message is 2,000 bytes, so it lists `max` and counts the rest. The
--- listed ones are the most profitable businesses first: this is a tool for
--- owning companies, and a breakout is a question about the price of one that
--- is already worth owning — the rest are on the screen page.
-function g_exports.report_signals_brief(items, opts)
-    if type(items) ~= 'table' or #items == 0 then return nil end
-    opts = opts or {}
-    local max = opts.max or 10
+-- Every built-in rule's fields render differently — breakout is a question
+-- about how far above a line the close crossed, subnew about how far under
+-- one. One line per rule, `s.rule` picks the wording.
+local SIGNAL_LINE = {
+    breakout = function(s)
+        return string.format('高出均线 %s，ROE %s', report_pct(s.above, 1), report_pct(s.roe, 1))
+    end,
+    subnew = function(s)
+        return string.format('跌幅 %s，上市 %s 天，ROE %s', report_pct(s.drop_pct, 1),
+            tostring(s.age or '—'), report_pct(s.roe, 1))
+    end,
+}
+local SIGNAL_TITLE = { breakout = '突破横盘周线', subnew = '次新股，跌破首日开盘价' }
+
+-- One rule's new finds, for the push. A day can bring sixty of them and the
+-- message is 2,000 bytes, so it lists `max` and counts the rest. The listed
+-- ones are the most profitable businesses first: this is a tool for owning
+-- companies, and a signal is a question about the price of one that is
+-- already worth owning — the rest are on the screen page.
+local function rule_signals_brief(rule, items, max)
     local sorted = {}
     for i, s in ipairs(items) do sorted[i] = s end
     table.sort(sorted, function(a, b)
@@ -525,22 +536,41 @@ function g_exports.report_signals_brief(items, opts)
     for _, s in ipairs(items) do
         if tostring(s.signal_date) > newest then newest = tostring(s.signal_date) end
     end
-    local L = { string.format('**新突破 %d 只**（突破横盘周线，%s）', #items,
+    local line = SIGNAL_LINE[rule] or SIGNAL_LINE.breakout
+    local L = { string.format('**新发现 %d 只**（%s，%s）', #items, SIGNAL_TITLE[rule] or rule,
         #items > max and string.format('按 ROE 列前 %d', max) or '按 ROE 排') }
     for i = 1, math.min(max, #sorted) do
         local s = sorted[i]
         -- A find from an earlier day (a check was missed) says which day.
         local day = tostring(s.signal_date) ~= newest
             and string.format('（%s）', tostring(s.signal_date):sub(6)) or ''
-        L[#L + 1] = string.format('- %s（%s%s）%s：收盘 %s，高出均线 %s，ROE %s', s.name or s.code,
-            s.code, s.industry and ('，' .. s.industry) or '', day, num(s.signal_close),
-            report_pct(s.above, 1), report_pct(s.roe, 1))
+        L[#L + 1] = string.format('- %s（%s%s）%s：收盘 %s，%s', s.name or s.code,
+            s.code, s.industry and ('，' .. s.industry) or '', day, num(s.signal_close), line(s))
     end
     if #items > max then
         L[#L + 1] = string.format('其余 %d 只见网页「筛选 → 内置规则」。', #items - max)
     end
-    L[#L + 1] = '是价格信号，不是结论：公司值不值得买，还要看财报、估值和检查清单。'
     return table.concat(L, '\n')
+end
+
+-- Every built-in rule's new finds, for the push: one block per rule that
+-- found anything, in signals_rule_ids() order, the disclaimer said once.
+function g_exports.report_signals_brief(items, opts)
+    if type(items) ~= 'table' or #items == 0 then return nil end
+    opts = opts or {}
+    local max = opts.max or 10
+    local by_rule = {}
+    for _, s in ipairs(items) do
+        by_rule[s.rule] = by_rule[s.rule] or {}
+        table.insert(by_rule[s.rule], s)
+    end
+    local L = {}
+    for _, rule in ipairs(signals_rule_ids()) do
+        if by_rule[rule] then L[#L + 1] = rule_signals_brief(rule, by_rule[rule], max) end
+    end
+    if #L == 0 then return nil end
+    L[#L + 1] = '是价格信号，不是结论：公司值不值得买，还要看财报、估值和检查清单。'
+    return table.concat(L, '\n\n')
 end
 
 -- The review as a few lines, for a push message. The full three-part review
