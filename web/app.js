@@ -153,6 +153,7 @@
       : location.hash === '#/alerts' ? 'alerts'
       : location.hash === '#/screen' || rm ? 'screen'
       : location.hash === '#/review' ? 'review'
+      : location.hash === '#/commodities' ? 'commodities'
       : 'watchlist';
     for (const link of document.querySelectorAll('[data-nav]')) {
       if (link.dataset.nav === page) link.setAttribute('aria-current', 'page');
@@ -165,6 +166,7 @@
       return renderScreen(token, tab);
     }
     if (page === 'review') return renderReview(token);
+    if (page === 'commodities') return renderCommodities(token);
     return renderWatchlist(token);
   }
 
@@ -1630,17 +1632,23 @@
     band: { icon: '🎯', label: '你的区间' },
     percentile: { icon: '📊', label: '估值分位' },
     check: { icon: '🔎', label: '检查清单' },
+    commodity: { icon: '📈', label: '商品' },
   };
   const PUSHED = { true: '已推送', false: '待推送', skipped: '未配置推送', failed: '推送失败' };
 
   function alertItem(e, withStock) {
     const kind = KIND[e.kind] || { icon: '•', label: e.kind };
     const pushed = PUSHED[String(e.pushed)];
-    const icon = e.kind === 'check' ? (e.status === 'warn' ? '⚠️' : '✅') : kind.icon;
+    const icon = e.kind === 'check' ? (e.status === 'warn' ? '⚠️' : '✅')
+      : e.kind === 'commodity' ? (e.dir === 'down' ? '📉' : '📈') : kind.icon;
+    // A commodity's code is xmoat's own id, not a stock: it links to its page.
+    const who = e.kind === 'commodity'
+      ? h('a', { class: 'who', href: '#/commodities', text: e.name || e.code })
+      : h('a', { class: 'who', href: '#/stock/' + e.code, text: `${e.name || ''} ${e.code}` });
     return h('li', {},
       h('span', { class: 'kind', 'aria-hidden': 'true', text: icon }),
       h('div', { class: 'head' },
-        withStock ? h('a', { class: 'who', href: '#/stock/' + e.code, text: `${e.name || ''} ${e.code}` }) : null,
+        withStock ? who : null,
         h('span', { class: 'what', text: e.title }),
         h('span', { class: 'tag', text: kind.label })),
       h('span', { class: 'when' }, fmtTime(e.created_at), ' ',
@@ -1851,6 +1859,264 @@
   function sourcesLine(a) {
     const items = (a.sources || []).map(s => s.item).filter(Boolean);
     return h('p', { class: 'muted small', text: `数据来源：东方财富（${items.join('、')}），获取于 ${fmtTime(a.fetched_at)}。` });
+  }
+
+  // ── commodities ────────────────────────────────────────────────────────────
+  //
+  // Gold, futures and memory-chip prices watched for a turn (engine/commodity.lua).
+  // Every number here is the engine's: the average, the distance from it and
+  // the side are computed there and only formatted here.
+
+  const SIDE = { above: '均线之上', below: '均线之下' };
+
+  function fmtPrice(v) {
+    if (!isNum(v)) return '—';
+    const a = Math.abs(v);
+    return fmtNum(v, a >= 1000 ? 1 : a >= 10 ? 2 : 3);
+  }
+  function signedPct(v, digits) {
+    return isNum(v) ? (v > 0 ? '+' : '') + fmtPct(v, digits ?? 2) : '—';
+  }
+  const riseClass = v => (isNum(v) && v > 0 ? 'rise' : isNum(v) && v < 0 ? 'fall' : undefined);
+
+  function commodityState(it) {
+    const s = it.state || {};
+    if (it.rule === 'change') {
+      if (!s.judged_date) return h('span', { class: 'muted', text: '还没有取到' });
+      return h('span', {},
+        h('span', { class: riseClass(s.change_pct), text: `较上期 ${signedPct(s.change_pct)}` }),
+        h('span', { class: 'muted', text: `（${s.judged_date} 公布）` }));
+    }
+    if (!s.ready) {
+      return h('span', { class: 'muted',
+        text: `积累中 ${s.have ?? 0}/${s.need ?? it.ma_days} 期${it.source === 'em' ? '' : '（这个数据源没有免费历史，从加入那天开始记）'}` });
+    }
+    return h('span', {},
+      h('span', { class: s.side === 'above' ? 'rise' : 'fall', text: SIDE[s.side] || '—' }),
+      s.side_since ? h('span', { class: 'muted', text: `（自 ${s.side_since}）` }) : null);
+  }
+
+  function commodityParamsForm(it) {
+    const days = h('input', { type: 'number', min: '2', max: '250', step: '1', 'aria-label': '均线期数',
+      title: '均线期数', value: it.ma_days });
+    const band = h('input', { type: 'number', min: '0', max: '20', step: 'any', 'aria-label': '带宽 %',
+      title: '均线两侧不算穿越的宽度（%）', value: it.band_pct });
+    const save = h('button', { class: 'btn btn-small', type: 'submit', text: '保存' });
+    const form = h('form', { class: 'band-form' },
+      h('span', { class: 'small muted', text: '均线' }), days,
+      h('span', { class: 'small muted', text: `${it.unit || '期'}，带宽` }), band,
+      h('span', { class: 'small muted', text: '%' }), save);
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      busy(save, '…', async () => {
+        await api('PATCH', `/api/v1/commodities/${enc(it.id)}`,
+          { ma_days: Number(days.value), band_pct: Number(band.value) });
+        showStatus('已保存。参数变了，下一次检查重新取基准，不会因此推送');
+        route();
+      });
+    });
+    return form;
+  }
+
+  function commodityRow(it) {
+    const s = it.state || {};
+    const toggle = h('button', { class: 'btn btn-small btn-quiet', text: it.enabled === false ? '恢复' : '暂停' });
+    toggle.addEventListener('click', () => busy(toggle, '…', async () => {
+      await api('PATCH', `/api/v1/commodities/${enc(it.id)}`, { enabled: it.enabled === false });
+      route();
+    }));
+    const refresh = h('button', { class: 'btn btn-small btn-quiet', text: '刷新' });
+    refresh.addEventListener('click', () => busy(refresh, '…', async () => {
+      try { await api('POST', `/api/v1/commodities/${enc(it.id)}/refresh`); }
+      finally { route(); }
+    }));
+    const remove = h('button', { class: 'btn btn-small btn-quiet', text: '删除' });
+    remove.addEventListener('click', () => {
+      if (!window.confirm(`停止监控「${it.name || it.ref}」并删除它记下的价格？`)) return;
+      busy(remove, '…', async () => {
+        await api('DELETE', `/api/v1/commodities/${enc(it.id)}`);
+        route();
+      });
+    });
+
+    const avg = it.rule === 'change' ? h('span', { class: 'muted', text: '按每期涨跌' })
+      : h('span', {}, h('span', { class: 'num', text: fmtPrice(s.ma) }),
+          h('span', { class: 'muted small', text: ` ${it.ma_days} ${it.unit || '期'}` }));
+    return h('tr', {},
+      h('td', {},
+        h('div', { class: 'name', text: it.name || it.ref }),
+        h('div', { class: 'small muted' }, `${it.label || it.source} · ${it.ref}`,
+          it.enabled === false ? h('span', { class: 'tag', text: '已暂停' }) : null)),
+      h('td', { class: 'r nowrap' },
+        h('div', { class: 'num', text: fmtPrice(s.close) }),
+        h('div', { class: 'small muted', text: s.date || '' })),
+      h('td', { class: 'r nowrap' }, avg),
+      h('td', { class: 'r num' + (riseClass(s.dist_pct) ? ' ' + riseClass(s.dist_pct) : ''),
+        text: it.rule === 'change' ? '' : signedPct(s.dist_pct) }),
+      h('td', {}, commodityState(it),
+        s.error ? h('div', { class: 'small warn-note', text: `上次没取到：${s.error}` }) : null),
+      h('td', {}, s.last_event
+        ? h('span', { class: s.last_event.dir === 'up' ? 'rise' : 'fall', text: `${s.last_event.title}（${s.last_event.date}）` })
+        : h('span', { class: 'muted', text: '—' })),
+      h('td', {}, it.rule === 'change' ? null : commodityParamsForm(it),
+        h('div', { class: 'field-actions mt-s' }, refresh, toggle, remove)));
+  }
+
+  // Adding: Eastmoney's search for futures, spot and forex; DRAMeXchange's own
+  // list for memory chips. `have` is the ids already watched.
+  function commodityAddCard(have) {
+    const card = h('section', { class: 'card' }, h('h2', { text: '加入监控' }));
+    const state = { tab: 'em' };
+    const tabs = h('div', { class: 'seg screen-tabs', role: 'group', 'aria-label': '数据源' });
+    const body = h('div');
+    const TABS = [['em', '期货 / 现货 / 外汇'], ['dx', '存储芯片（DRAMeXchange）']];
+    function drawTabs() {
+      tabs.textContent = '';
+      for (const [value, label] of TABS) {
+        tabs.append(h('button', { type: 'button', text: label, 'aria-pressed': String(state.tab === value),
+          onclick: () => { state.tab = value; drawTabs(); draw(); } }));
+      }
+    }
+
+    async function add(button, payload) {
+      await busy(button, '加入中…', async () => {
+        const r = await api('POST', '/api/v1/commodities', payload);
+        showStatus(r.fetch_error ? `已加入，但这次没取到价格：${r.fetch_error}` : `已加入「${r.name || r.ref}」，已记下当前位置作为基准`, !!r.fetch_error);
+        route();
+      });
+    }
+    function addButton(id, payload) {
+      if (have.has(id)) return h('span', { class: 'tag', text: '已监控' });
+      const b = h('button', { class: 'btn btn-small', type: 'button', text: '加入' });
+      b.addEventListener('click', () => add(b, payload));
+      return b;
+    }
+
+    function drawEm() {
+      const input = h('input', { type: 'text', maxlength: '40', placeholder: '黄金、沪铜、原油、AUTD…', 'aria-label': '搜索' });
+      const go = h('button', { class: 'btn', type: 'submit', text: '搜索' });
+      const results = h('div', { class: 'table-wrap mt-s' });
+      const form = h('form', { class: 'band-form' }, input, go);
+      form.addEventListener('submit', e => {
+        e.preventDefault();
+        const q = input.value.trim();
+        if (!q) return;
+        busy(go, '…', async () => {
+          const list = await api('GET', `/api/v1/commodities/search?q=${enc(q)}`);
+          results.textContent = '';
+          if (!list.length) {
+            results.append(h('p', { class: 'muted', text: '没有找到期货、现货或外汇。股票请在右上角加入自选。' }));
+            return;
+          }
+          results.append(h('table', {},
+            h('thead', {}, h('tr', {}, h('th', { text: '名称' }), h('th', { text: '类别' }),
+              h('th', { text: '交易所' }), h('th', { text: '行情代码' }), h('th'))),
+            h('tbody', {}, list.map(x => h('tr', {},
+              h('td', { text: x.name || x.code }), h('td', { text: x.kind }), h('td', { text: x.exchange || '' }),
+              h('td', { class: 'num', text: x.secid }),
+              h('td', {}, addButton('em.' + x.secid, { source: 'em', ref: x.secid, name: x.name })))))));
+        });
+      });
+      body.append(form,
+        h('p', { class: 'small muted', text: '主力连续合约（名字带「主连」）适合看趋势；具体月份的合约到期就没有了。均线默认 20 日，带宽 0.5%，加入后可以改。' }),
+        results);
+    }
+
+    function drawDx() {
+      const load = h('button', { class: 'btn', type: 'button', text: '载入今天的条目' });
+      const results = h('div', { class: 'mt-s' });
+      load.addEventListener('click', () => busy(load, '载入中…', async () => {
+        const cat = await api('GET', '/api/v1/commodities/catalog');
+        results.textContent = '';
+        for (const err of cat.errors || []) results.append(h('p', { class: 'warn-note', text: err }));
+        const groups = new Map();
+        for (const it of cat.spot) {
+          if (!groups.has(it.group)) groups.set(it.group, []);
+          groups.get(it.group).push({ it, source: 'dx_spot', prefix: 'dxs.' });
+        }
+        for (const it of cat.contract) {
+          if (!groups.has(it.group)) groups.set(it.group, []);
+          groups.get(it.group).push({ it, source: 'dx_contract', prefix: 'dxc.' });
+        }
+        for (const [group, rows] of groups) {
+          results.append(h('h3', { class: 'label-sm mt', text: group }), h('div', { class: 'table-wrap' },
+            h('table', {},
+              h('thead', {}, h('tr', {}, h('th', { text: '条目' }), h('th', { class: 'r', text: '均价（美元）' }),
+                h('th', { class: 'r', text: '涨跌' }), h('th', { text: '日期' }), h('th'))),
+              h('tbody', {}, rows.map(({ it, source, prefix }) => h('tr', {},
+                h('td', { text: it.name }),
+                h('td', { class: 'r num', text: fmtPrice(it.avg) }),
+                h('td', { class: 'r num' + (riseClass(it.change_pct) ? ' ' + riseClass(it.change_pct) : ''), text: signedPct(it.change_pct) }),
+                h('td', { class: 'date', text: it.date }),
+                h('td', {}, addButton(prefix + it.id, { source, ref: it.id, name: it.name }))))))));
+        }
+      }));
+      body.append(load,
+        h('p', { class: 'small muted', text: '现货按均线判断：DRAM 颗粒每天一期，闪存、晶圆、模组大约每周一期；这个网站的历史价格只对付费会员开放，所以从加入那天开始记，默认攒满 10 期才开始判断。合约价大约每月公布一次，按每期涨跌判断：上涨、或由涨转跌时推送，继续下跌不推送。' }),
+        results);
+    }
+
+    function draw() {
+      body.textContent = '';
+      if (state.tab === 'em') drawEm(); else drawDx();
+    }
+    drawTabs();
+    draw();
+    card.append(tabs, body);
+    return card;
+  }
+
+  async function renderCommodities(token) {
+    document.title = '商品 · xmoat';
+    setView(loading());
+    let data;
+    try { data = await api('GET', '/api/v1/commodities'); }
+    catch (e) { if (!stale(token)) setView(errorCard(e, route)); return; }
+    if (stale(token)) return;
+
+    const items = data.items || [];
+    const runBtn = h('button', { class: 'btn btn-primary', text: '立即检查' });
+    runBtn.addEventListener('click', () => busy(runBtn, '检查中…', async () => {
+      const r = await api('POST', '/api/v1/commodities/run');
+      const parts = [`检查 ${r.checked} 项，转向 ${r.events} 次`];
+      if (r.push && r.push.sent) parts.push(`已推送 ${r.push.sent} 条`);
+      if (r.problems.length) parts.push('没取到：' + r.problems.map(p => `${p.name} ${p.error}`).join('；'));
+      showStatus(parts.join('，'), r.problems.length > 0);
+      route();
+    }));
+    const head = h('div', { class: 'page-head' },
+      h('h1', { text: '商品监控' }),
+      h('span', { class: 'meta', text: `${items.length} 项` }),
+      h('span', { class: 'spacer' }),
+      items.length ? runBtn : null);
+
+    const d = data.defaults || {};
+    const lr = data.last_run;
+    const kv = h('dl', { class: 'kv' });
+    const row = (k, v) => kv.append(h('dt', { text: k }), h('dd', {}, v));
+    row('规则', h('span', { text: '价格从均线之上跌到均线之下（超过带宽）推送「走势掉头」，从之下回到之上推送「转为上涨」；加入时和改参数后的第一次判断只记位置，不推送。' }));
+    row('盘中检查', h('span', { text: d.interval_min > 0
+      ? `每 ${d.interval_min} 分钟一次（周六早上到周一早上休市时跳过期货和现货；存储价格最多每 ${d.dx_ttl_min} 分钟取一次），另外每天收盘后的定时检查也会判断一次`
+      : '已关闭（COMMODITY_INTERVAL_MIN=0），只在每天收盘后的定时检查里判断' }));
+    row('上次检查', h('span', { text: lr ? `${fmtTime(lr.at)}，检查 ${lr.checked} 项，转向 ${lr.events} 次${lr.problems ? `，${lr.problems} 项没取到` : ''}` : '还没有' }));
+    const info = h('section', { class: 'card' }, kv);
+
+    let list;
+    if (!items.length) {
+      list = h('div', { class: 'card empty' },
+        h('p', { text: '还没有监控的商品。' }),
+        h('p', { class: 'muted', text: '在下面搜索黄金、铜、原油这样的期货或现货，或者载入 DRAMeXchange 的存储芯片现货和合约价。' }));
+    } else {
+      list = h('section', { class: 'card' }, h('div', { class: 'table-wrap' },
+        h('table', { class: 'watch-table' },
+          h('thead', {}, h('tr', {},
+            h('th', { text: '品种' }), h('th', { class: 'r', text: '最新' }), h('th', { class: 'r', text: '均线' }),
+            h('th', { class: 'r', text: '距均线' }), h('th', { text: '位置' }), h('th', { text: '最近一次转向' }),
+            h('th', { text: '参数' }))),
+          h('tbody', {}, items.map(commodityRow)))));
+    }
+    setView(head, list, commodityAddCard(new Set(items.map(it => it.id))), info);
+    view.focus({ preventScroll: true });
   }
 
   // ── adding a stock ─────────────────────────────────────────────────────────

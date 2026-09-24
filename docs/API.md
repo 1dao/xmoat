@@ -83,6 +83,15 @@
 | `notify.channels` | `GET /api/v1/notify/channels` | — | `{kind, name}[]`，不含任何密钥 |
 | `notify.test` | `POST /api/v1/notify/test` | — | `PushResult[]`；没有配置渠道时为 `bad_request` |
 | `schedule.status` | `GET /api/v1/schedule` | — | `ScheduleStatus` |
+| `commodity.list` | `GET /api/v1/commodities` | — | `CommodityList`：每个监控项的规则、最新价、均线和所处的一侧 |
+| `commodity.search` | `GET /api/v1/commodities/search` | `q` | `{secid, code, name, kind, exchange}[]`：东方财富里的期货、现货、外汇（不含股票），主力连续合约在前 |
+| `commodity.catalog` | `GET /api/v1/commodities/catalog` | — | `{spot: DxItem[], contract: DxItem[], errors?}`：DRAMeXchange 今天列出的条目 |
+| `commodity.add` | `POST /api/v1/commodities` | `source`（em / dx_spot / dx_contract），`ref`，`name?`，`note?`，`ma_days?`，`band_pct?` | `Commodity` 加 `rows`、`fetch_error?`：加入并立即取一次价格作为基准，不推送 |
+| `commodity.get` | `GET /api/v1/commodities/:id` | `days?` | `Commodity` 加 `rows`（由旧到新）与 `total_rows` |
+| `commodity.update` | `PATCH /api/v1/commodities/:id` | `name?`、`note?`（nullable），`ma_days?`，`band_pct?`，`enabled?` | `Commodity`；改了 `ma_days` 或 `band_pct` 会重新取基准 |
+| `commodity.remove` | `DELETE /api/v1/commodities/:id` | — | `{removed}`；连同它记下的价格序列一起删除 |
+| `commodity.refresh` | `POST /api/v1/commodities/:id/refresh` | — | `Commodity`：现在取这一项并判断，有转向就记录并推送 |
+| `commodity.run` | `POST /api/v1/commodities/run` | — | `CommodityRun`：现在检查每一项（不看开市时间和缓存），有转向就推送 |
 | `market.status` | `GET /api/v1/market` | — | `MarketStatus` |
 | `market.refresh` | `POST /api/v1/market/refresh` | — | `MarketStatus`（抓取全市场快照，约 15 次请求） |
 | `market.screen` | `GET /api/v1/market/screen` | 见下 | `ScreenResult` |
@@ -584,8 +593,10 @@ type Alert = {
   id: string,                               // 由股票和变化内容决定，同一变化只记一次
   seq: number,                              // 单调递增，用于 after_seq 轮询
   code: string, name: string,
-  kind: 'report' | 'dividend' | 'band' | 'percentile' | 'check' | 'level' | 'trend',
+  kind: 'report' | 'dividend' | 'band' | 'percentile' | 'check' | 'level' | 'trend' | 'commodity',
   // level 与 trend 只对登记了持仓的股票产生
+  // commodity 的 code 是监控项的 id（如 'em.113.aum'），不是股票代码；
+  // 它另有 dir: 'up' | 'down'、price、date
   title: string, detail: string,
   status?: 'pass' | 'warn',                 // 仅 check：变成了什么
   period?: string, date?: string,           // 报告期；公告日或估值日期
@@ -624,7 +635,8 @@ type RunResult = {
         | 'prices'                          // 刷新了，但两个行情源都没给出日线
         | 'index'                           // 复盘里的这个指数用的是缓存
         | 'review'                          // 复盘没有生成
-        | 'signals',                        // 内置规则没有运行
+        | 'signals'                         // 内置规则没有运行
+        | 'commodity',                      // 这个商品监控项没取到价格（code 是它的 id）
     code?: string, name?: string, error: string,
   }[],
   signals?: { checked: number, found: number, added: number, held: number,     // 内置规则这次跑的结果
@@ -644,7 +656,57 @@ type ScheduleStatus = {
   times?: string[], weekdays?: string, utc_offset?: number,
   now?: string, next_run?: string,          // 均为 utc_offset 时区的 'YYYY-MM-DD HH:MM'
   last_runs?: { [time: string]: string },
+  commodity_interval_min: number,           // 商品监控的盘中检查间隔，0 = 只随每日检查
   error?: string,                           // 配置有误时
+}
+```
+
+### Commodity、CommodityList、CommodityRun
+
+口径见 [METRICS.md](METRICS.md#商品监控)。
+
+```ts
+type Commodity = {
+  id: string,                               // 'em.113.aum' | 'dxs.dram.475' | 'dxc.dram.478'
+  source: 'em' | 'dx_spot' | 'dx_contract',
+  ref: string,                              // em：行情代码 secid；dx：条目 '<类别>.<编号>'
+  label: string,                            // 数据源的中文名
+  unit: '日' | '期',                         // 均线按什么计数：东方财富是交易日，DRAMeXchange 是每一次公布
+  rule: 'ma' | 'change',                    // ma：穿越均线；change：合约价每期涨跌
+  name?: string, note?: string, group?: string,
+  ma_days: number, band_pct: number,        // 均线期数；均线两侧不算穿越的宽度（%）
+  enabled: boolean, added_at: string,
+  state: {
+    date?: string, close?: number,          // 最新一条
+    checked_at?: string,
+    ready?: boolean, have?: number, need?: number,     // ma：攒够 need 条之前不判断
+    ma?: number, dist_pct?: number,         // ma：均线，距均线 %
+    slope_pct?: number,                     // ma：均线相对 5 期之前的变化 %
+    side?: 'above' | 'below', side_since?: string,
+    judged_date?: string,                   // change：已判断到哪一期
+    change_pct?: number, dir?: 'up' | 'down' | 'flat',
+    last_event?: { dir: 'up' | 'down', title: string, date: string, at: string },
+    error?: string, error_at?: string,      // 上一次没取到的原因；取到后清除
+  },
+}
+
+type CommodityList = {
+  items: Commodity[],
+  defaults: { ma_days, spot_ma_days, band_pct, interval_min, dx_ttl_min, max_rows: number },
+  running: boolean,
+  market_open: boolean,                     // 东方财富的品种此刻是否可能在交易
+  last_run?: { at, source, checked, skipped, events, problems },
+  dx: { spot_at?: string, contract_at?: string },   // 上次从 DRAMeXchange 取到的时间
+}
+
+type DxItem = { id: string, group: string, name: string, date: string,
+                high?: number, low?: number, avg?: number, change_pct?: number }  // 美元
+
+type CommodityRun = {
+  checked: number, skipped: number,         // skipped：休市或还不到再取的时间
+  events: number,                           // 新记下的转向
+  problems: { kind: 'commodity', code: string, name: string, error: string }[],
+  push?: object,                            // 同 RunResult.push；有转向时才有
 }
 ```
 

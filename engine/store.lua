@@ -15,10 +15,12 @@
 --   <DATA_DIR>/sectors.json         the board table, for the daily review
 --   <DATA_DIR>/regions.json         which region each stock belongs to
 --   <DATA_DIR>/signals.json         the built-in rule's finds, and what became of them
+--   <DATA_DIR>/commodities.json     watched commodities: what, the rule, the state it is in
 --   <DATA_DIR>/stocks/<code>.json
 --   <DATA_DIR>/quotes/<code>.json    daily prices; idx-<code>.json for an index
 --   <DATA_DIR>/insights/<code>.json  language-model readings, kept apart from
 --                                    source data on purpose
+--   <DATA_DIR>/commodities/<id>.json a watched commodity's own price series
 --
 -- A MySQL backend, if a multi-user server ever needs one, goes behind these
 -- same functions, as gitloom's store.lua does.
@@ -28,7 +30,7 @@ local root = nil
 -- MAIN STATE or anywhere: no yield. `dir` overrides DATA_DIR.
 function g_exports.store_init(dir)
     root = dir or cfg_get('DATA_DIR', 'data')
-    for _, sub in ipairs({ 'stocks', 'quotes', 'insights' }) do
+    for _, sub in ipairs({ 'stocks', 'quotes', 'insights', 'commodities' }) do
         local ok, err = util_dir_make(util_path_join(root, sub))
         if not ok then return nil, string.format('cannot create %s: %s', root, tostring(err)) end
     end
@@ -51,7 +53,7 @@ end
 local function path_of(name)
     assert(root, 'store_init has not run')
     if name == 'watchlist' or name == 'alerts' or name == 'state' or name == 'market'
-        or name == 'sectors' or name == 'regions' or name == 'signals' then
+        or name == 'sectors' or name == 'regions' or name == 'signals' or name == 'commodities' then
         return util_path_join(root, name .. '.json')
     end
     local code = name:match('^stock:(%d%d%d%d%d%d)$')
@@ -64,6 +66,12 @@ local function path_of(name)
     if code then return util_path_join(root, 'quotes', 'idx-' .. code .. '.json') end
     code = name:match('^insight:(%d%d%d%d%d%d)$')
     if code then return util_path_join(root, 'insights', code .. '.json') end
+    -- A commodity id ('em.113.aum', 'dxs.dram.475') becomes a file name, so it
+    -- is checked here too: letters, digits, _ and single dots, nothing else.
+    code = name:match('^cseries:([%w_%.]+)$')
+    if code and not code:find('..', 1, true) and not code:match('^%.') then
+        return util_path_join(root, 'commodities', code .. '.json')
+    end
     error('store: unknown document ' .. tostring(name), 3)
 end
 

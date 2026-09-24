@@ -8,7 +8,9 @@
 --          source_em_fetch_balance, source_em_fetch_dividends, source_em_fetch_business,
 --          source_em_fetch_kline, source_em_secid,
 --          source_em_parse_sectors, source_em_fetch_sectors,
---          source_em_fetch_board_members
+--          source_em_fetch_board_members,
+--          source_em_valid_secid, source_em_fetch_kline_secid,
+--          source_em_parse_search, source_em_search
 --
 -- Everything this file returns is in xmoat's own field names. Nothing outside
 -- it knows that Eastmoney calls weighted ROE `ROEJQ`, so a second source
@@ -582,6 +584,67 @@ function g_exports.source_em_fetch_kline(sec, from)
     local doc, err = net_get_json(url, { timeout_ms = from and nil or 60000 })
     if not doc then return nil, err end
     return source_em_parse_kline(doc)
+end
+
+-- ---------------------------------------------------------------------------
+-- Anything else the quote server carries: futures, spot gold, forex
+--
+-- The same kline endpoint answers for any security given its raw secid —
+-- '113.aum' is 沪金主连 on the Shanghai Futures Exchange, '118.AUTD' 黄金T+D on
+-- the Shanghai Gold Exchange, '101.GC00Y' COMEX gold. UNADJUSTED (fqt=0):
+-- a commodity pays no dividend, and a continuous futures series is stitched
+-- by the exchange's own convention, not ours. During a session the newest bar
+-- is the day so far, which is what watching one intraday reads.
+-- ---------------------------------------------------------------------------
+
+-- A secid as the quote server writes one: market number, a dot, a code.
+function g_exports.source_em_valid_secid(s)
+    return type(s) == 'string' and #s <= 40 and s:match('^%d+%.[%w_]+$') ~= nil
+end
+
+-- opts = { from = 'YYYY-MM-DD' } for the days since, or { limit = n } for the
+-- newest n. Returns { code, name, rows } like source_em_fetch_kline.
+function g_exports.source_em_fetch_kline_secid(secid, opts)
+    opts = opts or {}
+    if not source_em_valid_secid(secid) then return nil, 'not a secid: ' .. tostring(secid) end
+    local range = opts.from and ('&beg=' .. opts.from:gsub('%-', '') .. '&end=20500101')
+        or ('&lmt=' .. math.floor(opts.limit or 250) .. '&end=20500101')
+    local url = KLINE .. '?secid=' .. secid .. '&ut=' .. KLINE_UT ..
+        '&fields1=f1,f2,f3,f4,f5,f6' ..
+        '&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61' ..
+        '&klt=101&fqt=0' .. range
+    local doc, err = net_get_json(url)
+    if not doc then return nil, err end
+    return source_em_parse_kline(doc)
+end
+
+-- Search: what a person types ("黄金", "沪铜", "AUTD") into the secids the
+-- quote server knows. Only what is worth watching as a commodity comes back —
+-- futures, spot exchange contracts, forex — not the stocks and boards that
+-- share a name with a metal; a stock goes on the watchlist instead.
+local SEARCH = 'https://searchapi.eastmoney.com/api/suggest/get'
+local SEARCH_TOKEN = 'D43BF722C8E33BDC906FB84D85E326E8'   -- the site's own public token
+local SEARCH_KINDS = { Futures = '期货', UniversalFutures = '期货', SGE = '现货', FOREX = '外汇' }
+
+function g_exports.source_em_parse_search(doc)
+    local t = type(doc) == 'table' and doc.QuotationCodeTable or nil
+    if type(t) ~= 'table' then return nil, 'unexpected response shape (no QuotationCodeTable)' end
+    local out = {}
+    for _, x in ipairs(type(t.Data) == 'table' and t.Data or {}) do
+        local kind = SEARCH_KINDS[x.Classify]
+        if kind and source_em_valid_secid(x.QuoteID) then
+            out[#out + 1] = { secid = x.QuoteID, code = str(x.Code), name = str(x.Name),
+                              kind = kind, exchange = str(x.JYS) }
+        end
+    end
+    return out
+end
+
+function g_exports.source_em_search(q)
+    local url = SEARCH .. '?input=' .. notify_urlencode(q) .. '&type=14&token=' .. SEARCH_TOKEN .. '&count=30'
+    local doc, err = net_get_json(url)
+    if not doc then return nil, err end
+    return source_em_parse_search(doc)
 end
 
 -- ---------------------------------------------------------------------------

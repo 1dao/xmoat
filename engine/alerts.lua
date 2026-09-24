@@ -260,6 +260,17 @@ function g_exports.alerts_run()
             end
         end
 
+        -- The watched commodities, judged with the rest so a host whose
+        -- intraday watch is switched off still judges them once a day. What
+        -- they find goes out in this digest, and what could not be fetched
+        -- is a problem like any other.
+        local cok, cres = pcall(commodity_run, { source = 'daily' })
+        if cok and type(cres) == 'table' then
+            for _, p in ipairs(cres.problems or {}) do problems[#problems + 1] = p end
+        elseif not cok then
+            cfg_log_warn('commodity check in the daily run failed: %s', tostring(cres))
+        end
+
         -- The market review, so the check answers "what happened today" and
         -- not only "what changed about your stocks". Never allowed to break
         -- the push: a failed review is a missing tail, not a missing digest.

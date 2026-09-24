@@ -47,6 +47,7 @@ end
 local STATUS = { pass = '✅', warn = '⚠️', na = '➖' }
 local KIND_ICON = { report = '📄', dividend = '💰', band = '🎯', percentile = '📉',
                     check = '🔎', insight = '🧠', level = '📍', trend = '📈' }
+local COMMODITY_ICON = { up = '📈', down = '📉' }
 local REGIME = { bull = '多头（指数在上升的长期均线之上）', bear = '空头（指数在下降的长期均线之下）',
                  range = '震荡（指数与长期均线方向不一致）', unknown = '未知' }
 local POSITION = { below = '低于', inside = '位于', above = '高于' }
@@ -483,7 +484,7 @@ local function clip(s, max)
 end
 
 local PROBLEM = { prices = '日线', refresh = '刷新失败', index = '指数日线', review = '复盘没有生成',
-                  signals = '内置规则没有运行' }
+                  signals = '内置规则没有运行', commodity = '商品行情' }
 
 -- What a check could not fetch, as a few lines for the push. A check that
 -- finds nothing and a check that could not look both end with no alerts;
@@ -494,7 +495,8 @@ function g_exports.report_problems_brief(problems)
     local L = { '**这次检查有数据没取到**' }
     local judged = false
     for _, p in ipairs(problems) do
-        local who = p.code and string.format('%s（%s）', p.name or p.code, p.code) or ''
+        local who = p.code and string.format('%s（%s）', p.name or p.code,
+            p.kind == 'commodity' and '商品' or p.code) or ''
         L[#L + 1] = string.format('- %s%s：%s', who, PROBLEM[p.kind] or '数据', clip(p.error, 150))
         judged = judged or p.kind == 'prices' or p.kind == 'refresh'
     end
@@ -771,7 +773,10 @@ local function group_events(events, max)
         if shown >= max then break end
         local g = by_code[e.code]
         if not g then
-            g = { code = e.code, name = e.name, items = {} }
+            -- A commodity's code is xmoat's own id ('em.113.aum'), which
+            -- tells a reader nothing; it is named as a commodity instead.
+            g = { code = e.code, name = e.name, items = {},
+                  tag = e.kind == 'commodity' and '商品' or e.code }
             by_code[e.code] = g
             groups[#groups + 1] = g
         end
@@ -784,6 +789,7 @@ end
 local function event_icon(e)
     if e.kind == 'check' then return e.status == 'warn' and '⚠️' or '✅' end
     if e.kind == 'percentile' then return e.title:find('高位', 1, true) and '📈' or '📉' end
+    if e.kind == 'commodity' then return COMMODITY_ICON[e.dir] or '•' end
     return KIND_ICON[e.kind] or '•'
 end
 
@@ -794,7 +800,7 @@ function g_exports.report_events_markdown(events, opts)
     local L = { string.format('### %s（%d 条）', opts.title or 'xmoat 提醒', #events) }
     for _, g in ipairs(groups) do
         L[#L + 1] = ''
-        L[#L + 1] = string.format('**%s**（%s）', g.name or g.code, g.code)
+        L[#L + 1] = string.format('**%s**（%s）', g.name or g.code, g.tag)
         for _, e in ipairs(g.items) do
             L[#L + 1] = string.format('- %s %s', event_icon(e), e.title)
             if e.detail and e.detail ~= '' then L[#L + 1] = '  ' .. e.detail end
@@ -815,7 +821,7 @@ function g_exports.report_events_text(events, opts)
     local L = { string.format('%s（%d 条）', opts.title or 'xmoat 提醒', #events) }
     for _, g in ipairs(groups) do
         L[#L + 1] = ''
-        L[#L + 1] = string.format('【%s %s】', g.name or g.code, g.code)
+        L[#L + 1] = string.format('【%s %s】', g.name or g.code, g.tag)
         for _, e in ipairs(g.items) do
             L[#L + 1] = string.format('%s %s', event_icon(e), e.title)
             if e.detail and e.detail ~= '' then L[#L + 1] = '   ' .. e.detail end

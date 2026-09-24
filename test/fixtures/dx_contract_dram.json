@@ -1,0 +1,47 @@
+[
+  {
+    "show_listid": 481,
+    "show_name": "DDR5 8GB SO-DIMM",
+    "show_day": "2026-07-31T15:00:00",
+    "Apptype": "C",
+    "show_hi": 138.0,
+    "show_lo": 116.0,
+    "show_avg": 130.0,
+    "show_avg_change": 13.04,
+    "show_hi_change": 12.2,
+    "show_lo_change": 13.73,
+    "show_duration": 2,
+    "show_homesort": 1,
+    "updateTime": "1785481200"
+  },
+  {
+    "show_listid": 478,
+    "show_name": "DDR4 16GB SO-DIMM",
+    "show_day": "2026-07-31T15:00:00",
+    "Apptype": "C",
+    "show_hi": 285.0,
+    "show_lo": 235.0,
+    "show_avg": 265.0,
+    "show_avg_change": 16.74,
+    "show_hi_change": 11.33,
+    "show_lo_change": 22.4,
+    "show_duration": 2,
+    "show_homesort": 2,
+    "updateTime": "1785481200"
+  },
+  {
+    "show_listid": 465,
+    "show_name": "DDR4 8GB SO-DIMM",
+    "show_day": "2026-07-31T15:00:00",
+    "Apptype": "C",
+    "show_hi": 145.0,
+    "show_lo": 118.0,
+    "show_avg": 139.0,
+    "show_avg_change": 16.81,
+    "show_hi_change": 13.28,
+    "show_lo_change": 22.92,
+    "show_duration": 2,
+    "show_homesort": 3,
+    "updateTime": "1785481200"
+  }
+]

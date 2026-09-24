@@ -15,6 +15,7 @@ return {
     'engine/source_em.lua',  -- source_em_* Eastmoney
     'engine/tdx.lua',        -- tdx_*       the 通达信 quote protocol
     'engine/source_tdx.lua', -- source_tdx_* 通达信 bars, forward-adjusted here
+    'engine/source_dx.lua',  -- source_dx_* DRAMeXchange memory-chip prices
     'engine/fin.lua',        -- fin_*       report series, TTM, statistics
     'engine/valuation.lua',  -- valuation_* percentiles, reverse DCF, bands
     'engine/dividend.lua',   -- dividend_*
@@ -41,6 +42,7 @@ return {
     'engine/strategy.lua',   -- strategy_*  one rule across many stocks
     'engine/subnew.lua',     -- subnew_*    次新股: recently listed and beaten down
     'engine/signals.lua',    -- signals_*   the built-in rule's finds, kept and pushed
+    'engine/commodity.lua',  -- commodity_* gold, futures, memory chips: watched for a turn
     'engine/insight.lua',    -- insight_*   facts in, a checked reading out
     'engine/schedule.lua',   -- schedule_*  the daily check (started by a host)
     'engine/api.lua',        -- api_*       the command registry

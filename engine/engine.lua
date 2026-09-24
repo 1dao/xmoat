@@ -30,6 +30,8 @@ function g_exports.engine_start(opts)
     if not ok then return nil, 'signals: ' .. tostring(err) end
     ok, err = market_load()
     if not ok then return nil, 'market: ' .. tostring(err) end
+    ok, err = commodity_load()
+    if not ok then return nil, 'commodities: ' .. tostring(err) end
     sched_start(cfg_int('SCHED_TICK_MS', 20))
     commands_install()
     started = true

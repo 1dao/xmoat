@@ -1051,8 +1051,112 @@ local function install_strategy()
     })
 end
 
+local function install_commodity()
+    local id_param = { type = 'string', required = true, doc = '监控项 id，如 em.113.aum、dxs.dram.475' }
+
+    api_define({
+        name = 'commodity.list', method = 'GET', path = '/api/v1/commodities',
+        summary = '商品监控：每一项的规则、最新价、均线和所处的一侧',
+        handler = function() return commodity_list() end,
+    })
+
+    -- Before the :id routes: the first route that matches wins.
+    api_define({
+        name = 'commodity.search', method = 'GET', path = '/api/v1/commodities/search',
+        summary = '在东方财富搜索期货、现货、外汇（如 黄金、沪铜、AUTD）',
+        params = { q = { type = 'string', required = true, doc = '名称或代码' } },
+        handler = function(p)
+            local q = util_str_trim(p.q)
+            if q == '' or #q > 40 then return nil, 'bad_request', 'q 应为 1 到 40 个字符' end
+            return commodity_search(q)
+        end,
+    })
+
+    api_define({
+        name = 'commodity.catalog', method = 'GET', path = '/api/v1/commodities/catalog',
+        summary = 'DRAMeXchange 今天列出的存储现货与合约价条目',
+        handler = function() return commodity_catalog() end,
+    })
+
+    api_define({
+        name = 'commodity.run', method = 'POST', path = '/api/v1/commodities/run',
+        summary = '现在检查每一个监控项（不看开市时间），有转向就推送',
+        handler = function() return commodity_run({ source = 'manual', flush = true, force = true }) end,
+    })
+
+    api_define({
+        name = 'commodity.add', method = 'POST', path = '/api/v1/commodities',
+        summary = '加入商品监控，并立即取一次价格作为基准（第一次不推送）',
+        params = {
+            source = { type = 'string', required = true, enum = { 'em', 'dx_spot', 'dx_contract' },
+                       doc = 'em 东方财富（期货、现货、外汇）；dx_spot 存储现货；dx_contract 存储合约价' },
+            ref = { type = 'string', required = true, doc = 'em：行情代码如 113.aum；dx：条目如 dram.475' },
+            name = { type = 'string', doc = '显示名；不给就用数据源的' },
+            note = { type = 'string', doc = '备注' },
+            ma_days = { type = 'integer', doc = '均线期数，2–250；默认 COMMODITY_MA_DAYS（存储现货 COMMODITY_SPOT_MA_DAYS）' },
+            band_pct = { type = 'number', doc = '均线两侧不算穿越的宽度（%），默认 COMMODITY_BAND_PCT' },
+        },
+        handler = function(p)
+            local item, ecode, emsg = commodity_add(p)
+            if not item then return nil, ecode, emsg end
+            -- A fetch that fails leaves the item added, its state saying why;
+            -- the next check tries again.
+            local _, _, ferr = commodity_refresh(item.id)
+            local out = commodity_get(item.id, 0)
+            out.fetch_error = ferr
+            return out
+        end,
+    })
+
+    api_define({
+        name = 'commodity.get', method = 'GET', path = '/api/v1/commodities/:id',
+        summary = '一个监控项及其价格序列',
+        params = { id = id_param, days = { type = 'integer', doc = '最近多少条，默认全部' } },
+        handler = function(p)
+            if p.days and (p.days < 0 or p.days > 5000) then return nil, 'bad_request', 'days 应在 0 到 5000 之间' end
+            return commodity_get(p.id, p.days)
+        end,
+    })
+
+    api_define({
+        name = 'commodity.update', method = 'PATCH', path = '/api/v1/commodities/:id',
+        summary = '改名称、备注、均线期数、带宽或暂停；改规则参数会重新取基准',
+        params = {
+            id = id_param,
+            name = { type = 'string', nullable = true, doc = '显示名；null 清除' },
+            note = { type = 'string', nullable = true, doc = '备注；null 清除' },
+            ma_days = { type = 'integer', doc = '均线期数，2–250' },
+            band_pct = { type = 'number', doc = '带宽（%），0–20' },
+            enabled = { type = 'boolean', doc = 'false 暂停检查' },
+        },
+        handler = function(p)
+            return commodity_update(p.id, { name = p.name, note = p.note, ma_days = p.ma_days,
+                                            band_pct = p.band_pct, enabled = p.enabled })
+        end,
+    })
+
+    api_define({
+        name = 'commodity.remove', method = 'DELETE', path = '/api/v1/commodities/:id',
+        summary = '停止监控并删除它的价格序列',
+        params = { id = id_param },
+        handler = function(p)
+            local ok, ecode, emsg = commodity_remove(p.id)
+            if not ok then return nil, ecode, emsg end
+            return { removed = p.id }
+        end,
+    })
+
+    api_define({
+        name = 'commodity.refresh', method = 'POST', path = '/api/v1/commodities/:id/refresh',
+        summary = '现在取这一项的价格并判断',
+        params = { id = id_param },
+        handler = function(p) return commodity_refresh(p.id) end,
+    })
+end
+
 function g_exports.commands_install()
     install_system()
+    install_commodity()
     install_market()
     install_quote()
     install_market_list()

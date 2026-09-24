@@ -13,7 +13,11 @@
 -- UTC must still check after the A-share close, not eight hours early.
 --
 -- A slot runs at most once per day, and the day it last ran is kept in
--- data/state.json, so a restart does not repeat it. A slot whose time passed
+-- data/state.json, so a restart does not repeat it.
+--
+-- The same ticker drives the commodity watch (commodity_tick), which runs
+-- on its own interval rather than at these times — intraday, not after the
+-- close. A slot whose time passed
 -- while the process was down runs once when it comes back the same day — the
 -- data that check was for is still the data there is. Holidays are not known;
 -- a check on one finds nothing new and pushes nothing.
@@ -108,6 +112,9 @@ local function config()
 end
 
 local function tick()
+    -- The commodity watch has its own interval; it rides this timer because
+    -- there is one ticker per host, armed here on the main state.
+    commodity_tick()
     local conf = config()
     if not conf or alerts_running() then return end
     local clock = schedule_clock(conf.offset)
@@ -156,5 +163,6 @@ function g_exports.schedule_status()
     out.now = clock.date .. ' ' .. clock.hm
     out.last_runs = state and state.schedule_last or {}
     if timer then out.next_run = schedule_next(clock, conf.times, conf.weekdays, out.last_runs) end
+    out.commodity_interval_min = cfg_int('COMMODITY_INTERVAL_MIN', 15)
     return out
 end

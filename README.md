@@ -105,6 +105,11 @@
 - 检查清单出现新的提示，或提示解除
 - 工作日收盘后自动检查，推送到企业微信（群机器人或应用）、飞书、钉钉、Telegram 或任意 Webhook
 
+**我持有的股票背后那样东西，走势变了没有？**
+- 网页「商品」页监控黄金、铜、原油等期货与现货（东方财富），以及存储芯片的现货价和合约价（DRAMeXchange）
+- 价格跌破 N 期均线推送「走势掉头」，站回均线推送「转为上涨」；合约价按每期涨跌，上涨或由涨转跌时推送
+- 盘中每 15 分钟看一次，收盘后的检查再看一次；加入时只记下现状，不推送
+
 **主营靠什么赚钱？**
 - 按产品、地区、行业拆分的收入、占比和毛利率
 - 每条占比相对上一年的变化
@@ -400,6 +405,8 @@ xmoat/
     groups.lua           行业 / 板块 / 地域归属（地域来自东财地域板块）
     tdx.lua              通达信行情协议：二进制、长连接、可并发
     source_tdx.lua       通达信日线 → xmoat 记录，前复权在这里做
+    source_dx.lua        DRAMeXchange 存储芯片现货价与合约价
+    commodity.lua        商品监控：黄金、期货、存储价格的均线转向与合约价涨跌
     llm.lua              一次模型调用：Claude 原生接口或 OpenAI 兼容接口
     insight.lua          事实进、经过核对的解读出；问答
     api.lua  commands.lua  engine.lua 命令注册表、全部命令、启动与停止
@@ -421,6 +428,8 @@ xmoat/
 | A 股 | 东方财富公开接口：主要财务指标、每日估值、分红送配、资产负债表、主营构成 | ✅ 已接入 |
 | A 股 | 东方财富行情接口：日线（前复权，本地缓存增量更新）、指数、行业板块涨跌 | ✅ 已接入 |
 | A 股 | 通达信行情协议（TCP）：批量日线与除权数据，全市场扫描用；东方财富日线失败时的备用 | ✅ 已接入 |
+| 商品 | 东方财富行情接口：期货、上海金交所现货、COMEX、外汇的日线 | ✅ 已接入 |
+| 商品 | [DRAMeXchange](https://www.dramexchange.com)：存储芯片现货价（首页）与合约价；历史只对会员开放，从加入那天开始自己记 | ✅ 已接入 |
 | A 股 | [巨潮资讯](http://www.cninfo.com.cn)：定期报告与公告原文 | 计划中 |
 | A 股 | [Tushare Pro](https://tushare.pro) HTTP API | 计划中，作为备用源 |
 | 美股 | [SEC EDGAR](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) XBRL `companyfacts` | 计划中 |

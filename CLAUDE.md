@@ -237,6 +237,35 @@ sites use the short name. Entry points run twice (loader detour) — see the top
   a 次新股 WITHOUT requiring the fall. Against "any stock any day" the rule
   would look good for the wrong reason.
 
+## Commodities (gold, futures, memory chips)
+
+- `engine/commodity.lua` watches things a held stock moves with, and pushes
+  when their trend TURNS. Three sources: `em` (any Eastmoney secid — 113.aum
+  沪金主连, 118.AUTD, 101.GC00Y — unadjusted daily bars,
+  `source_em_fetch_kline_secid`), `dx_spot` and `dx_contract`
+  (`engine/source_dx.lua`, DRAMeXchange's home page HTML and its HomePrice
+  JSON). DRAMeXchange history is members-only: those series start the day an
+  item is added, one row per publication, so "N days" there is N publications.
+- Rules: `ma` (close crossing its N-row MA, with a `band_pct` no-man's-land
+  that holds the previous side — without it an intraday check pushes every
+  15 minutes) and `change` (a contract publication rising, or falling after
+  it was not). `commodity_judge` and `commodity_step` are pure; test them
+  with rows, not the network.
+- The first judgement after add, or after `ma_days`/`band_pct` change, is a
+  BASELINE: the side is recorded, nothing is pushed. `update` clears the side
+  to make that happen.
+- Events go into the ALERT LOG (kind `commodity`, `code` = the item id, not a
+  stock code — reports label it 商品, the web links it to `#/commodities`).
+- `commodity_tick` rides `schedule.lua`'s one ticker (main state; it only
+  spawns). Every `COMMODITY_INTERVAL_MIN`; Eastmoney items skipped Sat 06:00
+  to Mon 06:00 Beijing; DRAMeXchange at most every `COMMODITY_DX_TTL_MIN`.
+  `alerts_run` also runs it (`source = 'daily'`, no flush of its own) so a
+  host with the interval at 0 still judges daily; its fetch failures become
+  `problems`. Intraday failures are NOT pushed, only kept on the item.
+- A spot row's id is the chart link's `item=<cat>&type=<n>`, not its name;
+  several spot tables on that page share one element id, so rows are placed
+  in sections by position. `test/fixtures/dx_home.html` is a trimmed real page.
+
 ## Screening
 
 - `engine/market.lua` keeps its own snapshot (`data/market.json`): two

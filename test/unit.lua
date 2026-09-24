@@ -2562,6 +2562,253 @@ local function test_insight()
     api_call('watchlist.remove', { code = '600519' })
 end
 
+-- ── commodities: gold, futures, memory chips ────────────────────────────────
+
+local function test_commodity()
+    section('commodity sources (recorded responses)')
+    local html = assert(util_file_read('test/fixtures/dx_home.html'))
+    local spot = source_dx_parse_spot(html)
+    check('spot: rows found', spot and #spot.items == 14, spot and #spot.items)
+    local first = spot and spot.items[1] or {}
+    eq('spot: the id is the chart link\'s item and type', first.id, 'dram.475')
+    eq('spot: the name is the row\'s text', first.name, 'DDR5 16Gb (2Gx8) 4800/5600')
+    eq('spot: the date is its table\'s update stamp', first.date, '2026-09-24')
+    near('spot: the price is the session average', first.avg, 57.667, 1e-9)
+    near('spot: the change is signed', first.change_pct, 0.29, 1e-9)
+    eq('spot: the section it sits in', first.group, 'DRAM Spot')
+    local wafer
+    for _, it in ipairs(spot and spot.items or {}) do if it.id == 'wafer.1' then wafer = it end end
+    eq('spot: a weekly table keeps its own date', wafer and wafer.date, '2026-09-14')
+    near('spot: a fall is negative', wafer and wafer.change_pct, -0.31, 1e-9)
+    eq('spot: a page with no rows is an error, not an empty list', (source_dx_parse_spot('<html></html>')), nil)
+
+    local con = source_dx_parse_contract(fixture('dx_contract_dram.json'), 'dram')
+    eq('contract: three rows', con and #con.items, 3)
+    eq('contract: id from the list id', con and con.items[2].id, 'dram.478')
+    eq('contract: the day, not the time', con and con.items[2].date, '2026-07-31')
+    near('contract: change on the last period', con and con.items[2].change_pct, 16.74, 1e-9)
+
+    local found = source_em_parse_search(fixture('em_search_gold.json'))
+    local secids = {}
+    for _, x in ipairs(found or {}) do secids[x.secid] = x end
+    check('search: COMEX gold is a future', secids['101.GC00Y'] and secids['101.GC00Y'].kind == '期货')
+    check('search: gold-mining stocks and the gold board are left out',
+        not secids['1.600489'] and not secids['90.BK1617'])
+    check('secid: 113.aum is one', source_em_valid_secid('113.aum'))
+    check('secid: a path is not', not source_em_valid_secid('113.../x'))
+
+    section('commodity rules')
+    local function rows_of(closes, start)
+        local out, d = {}, start or '2026-08-01'
+        for i, c in ipairs(closes) do
+            out[i] = { date = d, close = c }
+            d = util_date_add_days(d, 1)
+        end
+        return out
+    end
+    local conf = { rule = 'ma', ma_days = 5, band_pct = 1 }
+    local j = commodity_judge(rows_of({ 10, 10, 10 }), conf, {})
+    check('too few rows: not ready, and says how many it has', not j.ready and j.have == 3 and j.need == 5)
+    j = commodity_judge(rows_of({ 10, 10, 10, 10, 11 }), conf, {})
+    -- MA5 = 10.2, close 11 is 7.8% over: above.
+    eq('over the average and the band: above', j.side, 'above')
+    near('the average', j.ma, 10.2, 1e-9)
+    j = commodity_judge(rows_of({ 10, 10, 10, 10, 10.1 }), conf, { side = 'below' })
+    -- MA5 = 10.02, close 10.1 is 0.8% over — inside a 1% band.
+    eq('inside the band the side holds', j.side, 'below')
+    j = commodity_judge(rows_of({ 10, 10, 10, 10, 9 }), conf, { side = 'above' })
+    eq('under the average and the band: below', j.side, 'below')
+
+    local item = { id = 'em.113.aum', source = 'em', ref = '113.aum', name = '沪金主连', rule = 'ma' }
+    local up = commodity_judge(rows_of({ 10, 10, 10, 10, 11 }), conf, {})
+    local st, ev = commodity_step(item, up, {})
+    eq('the first judgement is a baseline: no event', ev, nil)
+    eq('and it records the side', st.side, 'above')
+    local long = commodity_judge(rows_of({ 10, 10, 10, 10, 10, 9, 9, 9, 9 }), conf, {})
+    -- MA5 at day 6 is 9.8 (close 9 under), day 5 is 10 (close 10 on it: above).
+    eq('a baseline knows how long it has been on its side', commodity_step(item, long, {}).side_since,
+        '2026-08-06')
+    local down = commodity_judge(rows_of({ 10, 10, 10, 10, 11, 9 }), conf, st)
+    local st2, ev2 = commodity_step(item, down, st)
+    check('above to below is a turn', ev2 and ev2.dir == 'down' and ev2.title:find('走势掉头', 1, true),
+        ev2 and ev2.title)
+    check('the detail names the price, the average and where it was',
+        ev2 and ev2.detail:find('最新 9.000', 1, true) and ev2.detail:find('此前自 2026-08-05 起在均线之上', 1, true),
+        ev2 and ev2.detail)
+    eq('the event is a commodity alert under the item\'s id', ev2 and ev2.code .. '|' .. ev2.kind,
+        'em.113.aum|commodity')
+    local _, ev3 = commodity_step(item, down, st)
+    eq('the same turn on the same day has the same id', ev3 and ev3.id, ev2 and ev2.id)
+    local _, ev4 = commodity_step(item, down, st2)
+    eq('staying below is not news', ev4, nil)
+    local back = commodity_judge(rows_of({ 10, 10, 10, 10, 11, 9, 12 }), conf, st2)
+    local _, ev5 = commodity_step(item, back, st2)
+    check('below to above is a rise', ev5 and ev5.dir == 'up' and ev5.title:find('转为上涨', 1, true),
+        ev5 and ev5.title)
+
+    local citem = { id = 'dxc.dram.478', source = 'dx_contract', ref = 'dram.478', name = 'DDR4', rule = 'change' }
+    local cconf = { rule = 'change' }
+    local c1 = { { date = '2026-07-31', close = 265, change_pct = 16.74 } }
+    local cs = commodity_step(citem, commodity_judge(c1, cconf, {}), {})
+    eq('contract: the first publication seen is a baseline', cs.judged_date, '2026-07-31')
+    local c2 = { c1[1], { date = '2026-08-31', close = 270, change_pct = 1.9 } }
+    local cs2, cev = commodity_step(citem, commodity_judge(c2, cconf, cs), cs)
+    eq('contract: a rise after a rise continues', cev and cev.title, '合约价续涨')
+    local c3 = { c2[1], c2[2], { date = '2026-09-30', close = 260, change_pct = -3.7 } }
+    local cs3, cev2 = commodity_step(citem, commodity_judge(c3, cconf, cs2), cs2)
+    eq('contract: a fall after a rise is a turn', cev2 and cev2.title, '合约价掉头下跌')
+    local c4 = { c3[2], c3[3], { date = '2026-10-31', close = 250, change_pct = -3.8 } }
+    local _, cev3 = commodity_step(citem, commodity_judge(c4, cconf, cs3), cs3)
+    eq('contract: a fall after a fall is not news', cev3, nil)
+    local _, cev4 = commodity_step(citem, commodity_judge(c3, cconf, cs3), cs3)
+    eq('contract: a publication already judged is not judged again', cev4, nil)
+
+    local function clk(wday, hm) return { iso_wday = wday, hm = hm, date = '2026-09-26' } end
+    check('open on a Wednesday afternoon', commodity_market_open(clk(3, '14:00')))
+    check('open at 01:00 on Saturday (the night session)', commodity_market_open(clk(6, '01:00')))
+    check('shut on Saturday afternoon', not commodity_market_open(clk(6, '12:00')))
+    check('shut all Sunday', not commodity_market_open(clk(7, '20:00')))
+    check('open again Monday morning', commodity_market_open(clk(1, '07:00')))
+
+    section('commodity watch, end to end')
+    local closes = {}
+    for i = 1, 20 do closes[i] = 900 + i end     -- a steady rise
+    local function kline_json()
+        local lines, d = {}, '2026-08-01'
+        for i, c in ipairs(closes) do
+            lines[i] = string.format('%s,%.2f,%.2f,%.2f,%.2f,1000,1000000,1.0,0.1,1.0,0', d, c, c, c + 1, c - 1)
+            d = util_date_add_days(d, 1)
+        end
+        return util_json_encode({ rc = 0, data = { code = 'aum', market = 113, name = '沪金主连',
+                                                   klines = lines } })
+    end
+    local contract_text = util_file_read('test/fixtures/dx_contract_dram.json')
+    local pushes, asked = {}, {}
+    local function transport_for_commodities(url, opts)
+        asked[#asked + 1] = url
+        if url:find('wecom.test', 1, true) then
+            pushes[#pushes + 1] = util_json_decode(opts.body).markdown.content
+            return { status = 200, body = '{"errcode":0,"errmsg":"ok"}' }
+        elseif url:find('push2his.eastmoney.com', 1, true) then
+            return { status = 200, body = kline_json() }
+        elseif url:find('HomePrice?Source=NationalDramContract', 1, true) then
+            return { status = 200, body = contract_text }
+        elseif url:find('HomePrice', 1, true) then
+            return { status = 200, body = '[]' }
+        elseif url:find('dramexchange.com', 1, true) then
+            return { status = 200, body = html }
+        elseif url:find('searchapi.eastmoney.com', 1, true) then
+            return { status = 200, body = util_file_read('test/fixtures/em_search_gold.json') }
+        end
+        return nil, 'no network expected: ' .. tostring(url)
+    end
+    __net_set_transport(transport_for_commodities)
+    __notify_set_channels({ { kind = 'wecom', name = '企业微信', conf = { url = 'https://wecom.test/send?key=k' } } })
+
+    eq('an unknown source is refused', api_call('commodity.add', { source = 'x', ref = '113.aum' }).error.code,
+        'bad_request')
+    eq('a secid that is not one is refused', api_call('commodity.add', { source = 'em', ref = 'aum' }).error.code,
+        'bad_request')
+    eq('a one-day average is refused', api_call('commodity.add',
+        { source = 'em', ref = '113.aum', ma_days = 1 }).error.code, 'bad_request')
+    local seq0 = (alerts_list({ limit = 1 })[1] or {}).seq or 0
+    local a = api_call('commodity.add', { source = 'em', ref = '113.aum', ma_days = 5 })
+    check('add fetches a baseline', a.ok and a.data.state.ready and a.data.state.side == 'above',
+        a.error and a.error.message)
+    eq('the name comes from the source', a.ok and a.data.name, '沪金主连')
+    check('the adding request asked for the newest bars, not a date range',
+        asked[1] and asked[1]:find('secid=113.aum', 1, true) and asked[1]:find('lmt=', 1, true), asked[1])
+    eq('adding it twice conflicts', api_call('commodity.add', { source = 'em', ref = '113.aum' }).error.code,
+        'conflict')
+    eq('a baseline records no alert', (alerts_list({ limit = 1 })[1] or {}).seq or 0, seq0)
+
+    closes[#closes + 1] = 880                     -- today falls through the line
+    asked = {}
+    local run = api_call('commodity.run')
+    check('run checks it', run.ok and run.data.checked == 1, run.error and run.error.message)
+    eq('and finds one turn', run.ok and run.data.events, 1)
+    check('an extension asks from a little before the last bar',
+        asked[1] and asked[1]:find('beg=20260810', 1, true), asked[1])
+    local pushed = pushes[#pushes] or ''
+    check('it is pushed, named as a commodity', pushed:find('沪金主连', 1, true)
+        and pushed:find('（商品）', 1, true) and pushed:find('走势掉头：跌破 5 日均线', 1, true), pushed)
+    local logged = alerts_list({ limit = 1 })[1] or {}
+    eq('the alert log has it', logged.kind, 'commodity')
+    eq('delivered', logged.pushed, true)
+    local n = #pushes
+    run = api_call('commodity.run')
+    eq('the same side again finds nothing', run.ok and run.data.events, 0)
+    eq('and pushes nothing', #pushes, n)
+
+    local upd = api_call('commodity.update', { id = 'em.113.aum', ma_days = 10 })
+    check('changing the average starts over', upd.ok and upd.data.ma_days == 10 and upd.data.state.side == nil,
+        upd.error and upd.error.message)
+    run = api_call('commodity.run')
+    eq('so the next judgement is a baseline again', run.ok and run.data.events, 0)
+    eq('a paused item', api_call('commodity.update', { id = 'em.113.aum', enabled = false }).data.enabled, false)
+    run = api_call('commodity.run')
+    eq('is not checked', run.ok and run.data.checked, 0)
+
+    local ds = api_call('commodity.add', { source = 'dx_spot', ref = 'dram.475' })
+    check('a spot item takes its name from the page', ds.ok and ds.data.name == 'DDR5 16Gb (2Gx8) 4800/5600',
+        ds.error and ds.error.message)
+    check('and says how far it is from a first judgement',
+        ds.ok and ds.data.state.have == 1 and ds.data.state.need == 10 and not ds.data.state.ready)
+    eq('an item the page does not list is added, with the reason on it',
+        api_call('commodity.add', { source = 'dx_spot', ref = 'dram.1' }).data.fetch_error ~= nil, true)
+    api_call('commodity.remove', { id = 'dxs.dram.1' })
+
+    local dc = api_call('commodity.add', { source = 'dx_contract', ref = 'dram.478' })
+    eq('a contract item\'s baseline is the publication seen', dc.ok and dc.data.state.judged_date, '2026-07-31')
+    contract_text = contract_text:gsub('2026%-07%-31T15:00:00', '2026-08-31T15:00:00')
+        :gsub('16%.74', '-2.5')
+    n = #pushes
+    run = api_call('commodity.run')
+    check('a new publication that fell after a rise is pushed',
+        run.ok and run.data.events == 1 and #pushes == n + 1
+        and pushes[#pushes]:find('合约价掉头下跌', 1, true), pushes[#pushes])
+
+    local listed = api_call('commodity.list')
+    eq('the list has all three', listed.ok and #listed.data.items, 3)
+    local g = api_call('commodity.get', { id = 'dxc.dram.478' })
+    eq('get returns its series', g.ok and #g.data.rows, 2)
+
+    local function req(method, path, query)
+        local resp = http_dispatch({ method = method, path = path, headers = {},
+                                     query = query or {}, body = '' }, {})
+        return resp, util_json_decode(resp.body or '')
+    end
+    local resp, body = req('GET', '/api/v1/commodities/search', { q = '黄金' })
+    check('search is its own route, not an id', resp.status == 200 and body.data[1]
+        and body.data[1].secid == '101.GC00Y', resp.body)
+    local function hit(secid, name)
+        return { QuoteID = secid, Code = secid:match('%.(.+)$'), Name = name, Classify = 'Futures', JYS = 'SHFE' }
+    end
+    __net_set_transport(function(url)
+        -- '主连', percent-encoded: the second search, for the continuous contract.
+        local data = url:find('%E4%B8%BB%E8%BF%9E', 1, true) and { hit('113.aum', '沪金主连') }
+            or { hit('113.au2610', '沪金2610'), hit('113.au2612', '沪金2612') }
+        return { status = 200, body = util_json_encode({ QuotationCodeTable = { Data = data } }) }
+    end)
+    local s = api_call('commodity.search', { q = '沪金' })
+    eq('a search that found only month contracts also asks for the 主连, and puts it first',
+        s.ok and s.data[1].secid .. '/' .. #s.data, '113.aum/3')
+    __net_set_transport(transport_for_commodities)
+    resp, body = req('GET', '/api/v1/commodities/catalog')
+    eq('the catalog lists the page', resp.status == 200 and #body.data.spot, 14)
+    resp = req('GET', '/api/v1/commodities/em.113.aum')
+    eq('an id with dots routes', resp.status, 200)
+
+    eq('remove', api_call('commodity.remove', { id = 'em.113.aum' }).ok, true)
+    check('and its series goes with it', not util_file_exists(store_dir() .. '/commodities/em.113.aum.json'))
+    eq('removing twice is not_found', api_call('commodity.remove', { id = 'em.113.aum' }).error.code, 'not_found')
+    api_call('commodity.remove', { id = 'dxs.dram.475' })
+    api_call('commodity.remove', { id = 'dxc.dram.478' })
+
+    __net_set_transport(nil)
+    __notify_set_channels(nil)
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local DATA = 'tmp/unit-data'
@@ -2570,7 +2817,9 @@ local function clean()
     for _, f in ipairs({ 'watchlist.json', 'alerts.json', 'state.json', 'stocks/600519.json',
                          'stocks/000001.json', 'stocks/609999.json', 'insights/600519.json',
                          'market.json', 'signals.json', 'quotes/600001.json', 'quotes/300002.json',
-                         'quotes/300003.json' }) do
+                         'quotes/300003.json', 'commodities.json', 'commodities/em.113.aum.json',
+                         'commodities/dxs.dram.475.json', 'commodities/dxs.dram.1.json',
+                         'commodities/dxc.dram.478.json' }) do
         util_file_remove(DATA .. '/' .. f)
     end
 end
@@ -2593,6 +2842,7 @@ local function run_all()
     test_wecom_callback()
     test_alerts(evs)
     test_schedule()
+    test_commodity()
     test_position_events()
     test_refresh_events()
     test_business()

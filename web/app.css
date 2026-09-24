@@ -247,6 +247,9 @@ td .sub { display: block; color: var(--muted); font-size: 12px; }
 
 .pos-below { color: var(--good-ink); }
 .pos-above { color: var(--critical); }
+/* A price moving: red up, green down, as the market it is read in writes it. */
+.rise { color: var(--critical); }
+.fall { color: var(--good-ink); }
 
 /* ── band editor ─────────────────────────────────────────────────────────── */
 
@@ -311,7 +314,7 @@ pre.raw { white-space: pre-wrap; font-size: 12px; background: var(--surface-2); 
 .check { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); font-size: 13px; }
 .screen-tabs { margin-bottom: 12px; }
 /* A date broken over two lines reads as two numbers. */
-td.date { white-space: nowrap; }
+td.date, td.nowrap { white-space: nowrap; }
 .check input { margin: 0; }
 
 /* ── alerts ──────────────────────────────────────────────────────────────── */
